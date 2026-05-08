@@ -499,3 +499,11 @@ input, textarea, select { font: inherit; }
 .api-key-scope-header strong { font-weight: 600; }
 .api-key-scope-row.collapsible .api-key-scope-body[hidden] { display: none; }
 .api-key-scope-body { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+
+/* config-required modal + reusable modal action buttons */
+.modal-body .setting-hint { margin: 0 0 18px; line-height: 1.55; color: var(--text-muted); font-size: 14px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
+.modal-actions .btn-primary { padding: 8px 18px; background: var(--accent); color: var(--accent-text); border: none; border-radius: 8px; font-size: 14px; cursor: pointer; }
+.modal-actions .btn-primary:hover { background: var(--accent-hover); }
+.modal-actions .btn-ghost { padding: 8px 18px; background: transparent; color: var(--text-muted); border: 1px solid var(--border-soft); border-radius: 8px; font-size: 14px; cursor: pointer; }
+.modal-actions .btn-ghost:hover { color: var(--text-strong); border-color: var(--accent); }

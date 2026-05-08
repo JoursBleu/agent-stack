@@ -158,6 +158,23 @@
   </div>
 </div>
 
+<!-- Config-required modal: shown before first chat when LLM_* unset -->
+<div id="config-required-modal" class="modal hidden">
+  <div class="modal-card modal-card--sm">
+    <div class="modal-header">
+      <h2 id="config-required-title" data-i18n="chat.config_required_title">Configure your upstream LLM</h2>
+      <button id="config-required-close" type="button">×</button>
+    </div>
+    <div class="modal-body">
+      <p id="config-required-msg" class="setting-hint"></p>
+      <div class="modal-actions">
+        <button type="button" id="config-required-cancel" class="btn-ghost" data-i18n="chat.config_required_cancel">Cancel</button>
+        <button type="button" id="config-required-open" class="btn-primary" data-i18n="chat.config_required_open">Open settings</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/app.js" type="module"></script>
 </body>
 </html>

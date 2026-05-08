@@ -769,6 +769,48 @@ function renderModelPicker() {
   }
 }
 
+function showConfigRequiredModal(backendName) {
+  return new Promise((resolve) => {
+    const modal  = document.getElementById("config-required-modal");
+    const msgEl  = document.getElementById("config-required-msg");
+    const okBtn  = document.getElementById("config-required-open");
+    const noBtn  = document.getElementById("config-required-cancel");
+    const xBtn   = document.getElementById("config-required-close");
+    if (!modal || !msgEl || !okBtn || !noBtn || !xBtn) {
+      // Fallback if HTML wasn't refreshed.
+      resolve(confirm(t("chat.config_required_msg", { backend: backendName })));
+      return;
+    }
+    msgEl.textContent = t("chat.config_required_msg", { backend: backendName });
+    let done = false;
+    const close = (val) => {
+      if (done) return;
+      done = true;
+      modal.classList.add("hidden");
+      okBtn.removeEventListener("click", onOk);
+      noBtn.removeEventListener("click", onNo);
+      xBtn.removeEventListener("click", onNo);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    };
+    const onOk = () => close(true);
+    const onNo = () => close(false);
+    const onBackdrop = (e) => { if (e.target === modal) close(false); };
+    const onKey = (e) => {
+      if (e.key === "Escape") close(false);
+      else if (e.key === "Enter") close(true);
+    };
+    okBtn.addEventListener("click", onOk);
+    noBtn.addEventListener("click", onNo);
+    xBtn.addEventListener("click", onNo);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+    modal.classList.remove("hidden");
+    setTimeout(() => okBtn.focus(), 30);
+  });
+}
+
 async function ensureUpstreamConfigured(backendName) {
   // Pre-flight: don't let a user start a new chat (or send the first
   // message after a hard reload) when LLM_BASE_URL / LLM_API_KEY /
@@ -789,13 +831,8 @@ async function ensureUpstreamConfigured(backendName) {
     return (eff[v].source === "unset");
   });
   if (missing.length === 0) return true;
-  // Show modal-ish confirm dialog. We reuse the existing settings modal:
-  // open it, scroll to the upstream group, and bail out of createChat.
-  const open = confirm(
-    t("chat.config_required_title") + "\n\n" +
-    t("chat.config_required_msg", { backend: backendName }) + "\n\n" +
-    "[" + t("chat.config_required_open") + " / " + t("chat.config_required_cancel") + "]"
-  );
+  // In-app modal (replaces the native confirm() which looked awful on mobile and zh).
+  const open = await showConfigRequiredModal(backendName);
   if (open) {
     await openAppSettings();
     // Focus the first empty input in the upstream group so the user can
