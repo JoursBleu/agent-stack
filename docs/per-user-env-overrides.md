@@ -56,13 +56,14 @@ All routes require an authenticated session cookie.
 
   ```json
   {
-    "vars": ["LLM_BASE_URL", "LLM_API_KEY"],
+    "vars": ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"],
     "backends": {
       "LLM_BASE_URL": ["openclaw", "hermes"],
-      "LLM_API_KEY":  ["openclaw", "hermes"]
+      "LLM_API_KEY":  ["openclaw", "hermes"],
+      "LLM_MODEL":    ["openclaw", "hermes"]
     },
-    "admin_shared":         {"LLM_BASE_URL": true,  "LLM_API_KEY": true},
-    "admin_shared_present": {"LLM_BASE_URL": true,  "LLM_API_KEY": true},  // some admin has stored a value
+    "admin_shared":         {"LLM_BASE_URL": true,  "LLM_API_KEY": true, "LLM_MODEL": true},
+    "admin_shared_present": {"LLM_BASE_URL": true,  "LLM_API_KEY": true, "LLM_MODEL": true},  // some admin has stored a value
 
     "overrides": {
       "":         {"LLM_BASE_URL": "ht…/v1"},

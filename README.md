@@ -53,7 +53,7 @@ browser
         /data/users/<slug>/openclaw)                     /data/users/<slug>/hermes-agent)
                   │                                              │
                   └──────────────► OpenAI-compatible upstream ◄──┘
-                                       (LLM_BASE_URL / LLM_API_KEY,
+                                       (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL,
                                         admin sets in web UI; per-user
                                         override allowed)
 ```
@@ -97,7 +97,7 @@ cd agent-stack
 
 cp .env.example .env
 # edit .env: set HOST_STACK_ROOT, JWT_SECRET, BOOTSTRAP_ADMIN_*
-# (the router does NOT read LLM_BASE_URL / LLM_API_KEY from .env any more —
+# (the router does NOT read LLM_BASE_URL / LLM_API_KEY / LLM_MODEL from .env any more —
 #  the bootstrap admin saves them in the web UI after first login; see step
 #  "Seed the upstream LLM key" below)
 
@@ -121,14 +121,17 @@ user — the only `admin` is the bootstrap one).
 
 ### Seed the upstream LLM key (required before the first chat)
 
-The router never reads `LLM_BASE_URL` / `LLM_API_KEY` from `.env`. After
+The router never reads `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` from `.env`. After
 logging in as the bootstrap admin:
 
 1. Click the **gear icon** (lower-left) → *Backend API keys*.
 2. In the `LLM_BASE_URL` card, set the **Global** value to your
    OpenAI-compatible base URL (e.g. `https://api.openai.com/v1`).
 3. In the `LLM_API_KEY` card, set the **Global** value to your key.
-4. (Optional) Toggle **"Share my Global value with other users"** on
+4. In the `LLM_MODEL` card, set the **Global** value to the upstream
+   model id (e.g. `gpt-5-mini`, `qwen3-72b-instruct`). This is what
+   hermes / openclaw will pass to the upstream `/v1/chat/completions`.
+5. (Optional) Toggle **"Share my Global value with other users"** on
    each card so non-admin users inherit the same value. Without this
    toggle, every user has to fill their own key in their own settings.
 
@@ -148,12 +151,17 @@ curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
 curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
      -d '{"value":"sk-...","backend":""}' \
      $BASE/api/me/env-overrides/LLM_API_KEY
+curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
+     -d '{"value":"gpt-5-mini","backend":""}' \
+     $BASE/api/me/env-overrides/LLM_MODEL
 
 # 3) (optional) share them with non-admin users
 curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
      -d '{"shared":true}' $BASE/api/admin/shared-env/LLM_BASE_URL
 curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
      -d '{"shared":true}' $BASE/api/admin/shared-env/LLM_API_KEY
+curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
+     -d '{"shared":true}' $BASE/api/admin/shared-env/LLM_MODEL
 ```
 
 Then start a new chat → pick a backend → first message triggers cold
@@ -162,7 +170,7 @@ start with progress bar; subsequent messages reuse the warm runner.
 ## Upstream LLM key — admin-shared default + per-user / per-backend override
 
 Every spawned agent container needs an OpenAI-compatible upstream
-(`LLM_BASE_URL` + `LLM_API_KEY`). agent-stack resolves the value for each
+(`LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL`). agent-stack resolves the value for each
 `(user, backend, var)` tuple in this order — **no router restart needed
 to switch any of these**:
 
@@ -254,7 +262,7 @@ the overlay (drop the proxy wrapper / sudo / fonts you don't need).
 | `BACKEND_PORT_START..END` | `19000..19999` | host port pool for runner publish |
 | `BACKEND_STARTUP_TIMEOUT` | `90` | seconds to wait for `ready_path` |
 
-> Upstream LLM credentials (`LLM_BASE_URL`, `LLM_API_KEY`) are intentionally
+> Upstream LLM credentials (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`) are intentionally
 > not in `.env`. The bootstrap admin saves them in *Settings → Backend API
 > keys* on first login (see Quick start above).
 
@@ -276,7 +284,7 @@ the overlay (drop the proxy wrapper / sudo / fonts you don't need).
   "seed_subdir": "openclaw-home",           // copied into per-user home on first start
   "mount_target": "/home/node/.openclaw",   // mount point inside the container
   "extra_env": {"OPENCLAW_GATEWAY_BIND": "0.0.0.0"},
-  "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY"],
+  "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"],
   "templated_files": ["openclaw.json"],     // re-rendered each ensure() so user overrides apply
   "cmd": ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"],
   "user": "node",                           // container user

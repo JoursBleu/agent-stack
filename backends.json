@@ -17,7 +17,7 @@
       "OPENCLAW_GATEWAY_BIND": "0.0.0.0",
       "NODE_ENV": "production"
     },
-    "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY"],
+    "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"],
     "templated_files": ["openclaw.json"],
     "cmd": ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"],
     "user": "node",
@@ -47,7 +47,7 @@
       "API_SERVER_MODEL_NAME": "hermes-agent",
       "GATEWAY_ALLOW_ALL_USERS": "true"
     },
-    "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY"],
+    "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"],
     "templated_files": ["config.yaml", ".env"],
     "cmd": ["gateway", "run"],
     "user": "root",
