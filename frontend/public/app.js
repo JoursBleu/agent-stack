@@ -85,9 +85,14 @@ const I18N = {
     "settings.api_keys_admin_toggle": "Share my Global value with other users",
     "settings.api_keys_admin_no_value": "Cannot share: save a Global value first.",
     "settings.api_keys_group_upstream": "Upstream LLM connection",
-    "settings.api_keys_group_upstream_hint": "OpenAI-compatible base URL + API key. Both fields apply together.",
+    "settings.api_keys_group_upstream_hint": "OpenAI-compatible base URL + API key + model id. All three apply together.",
     "settings.api_keys_field_base_url": "Base URL",
     "settings.api_keys_field_api_key": "API key",
+    "settings.api_keys_field_model": "Model",
+    "chat.config_required_title": "Configure your upstream LLM",
+    "chat.config_required_msg": "Before starting a chat with {backend}, set Base URL, API key, and Model in Settings → Backend API keys (each user keeps their own values; admin can optionally share a default).",
+    "chat.config_required_open": "Open settings",
+    "chat.config_required_cancel": "Cancel",
     "settings.api_keys_save_row": "Save",
     "settings.api_keys_clear_row": "Clear all",
     "settings.api_keys_unchanged": "(unchanged)",
@@ -202,9 +207,14 @@ const I18N = {
     "settings.api_keys_admin_toggle": "把我的「全局」值共享给其他用户",
     "settings.api_keys_admin_no_value": "无法共享：请先在「全局」一栏保存一个值。",
     "settings.api_keys_group_upstream": "上游 LLM 连接",
-    "settings.api_keys_group_upstream_hint": "OpenAI 兼容的 Base URL + API key，两项一起使用。",
+    "settings.api_keys_group_upstream_hint": "OpenAI 兼容的 Base URL + API key + Model ID，三项一起使用。",
     "settings.api_keys_field_base_url": "Base URL",
     "settings.api_keys_field_api_key": "API key",
+    "settings.api_keys_field_model": "Model",
+    "chat.config_required_title": "请先配置上游 LLM",
+    "chat.config_required_msg": "在和 {backend} 开新对话前，请在「设置 → Backend API keys」里填好 Base URL、API key 和 Model（每个用户独立保存；管理员也可以选择共享默认值）。",
+    "chat.config_required_open": "打开设置",
+    "chat.config_required_cancel": "取消",
     "settings.api_keys_save_row": "保存",
     "settings.api_keys_clear_row": "全部清除",
     "settings.api_keys_unchanged": "（不修改）",
@@ -759,7 +769,50 @@ function renderModelPicker() {
   }
 }
 
+async function ensureUpstreamConfigured(backendName) {
+  // Pre-flight: don't let a user start a new chat (or send the first
+  // message after a hard reload) when LLM_BASE_URL / LLM_API_KEY /
+  // LLM_MODEL still resolve to "unset" for this backend. Either the
+  // admin hasn't shared a default and the user hasn't filled their own,
+  // or one of three is missing. Returns true if config is OK.
+  const REQUIRED = ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"];
+  let info;
+  try {
+    info = await api("GET", "/api/me/env-overrides");
+  } catch (_) {
+    return true;  // if env-overrides API itself failed, fall through and let spawn surface the real error
+  }
+  const eff = (info.effective || {})[backendName] || {};
+  const missing = REQUIRED.filter((v) => {
+    // var not declared user_overridable_env on this backend → not relevant
+    if (!(v in eff)) return false;
+    return (eff[v].source === "unset");
+  });
+  if (missing.length === 0) return true;
+  // Show modal-ish confirm dialog. We reuse the existing settings modal:
+  // open it, scroll to the upstream group, and bail out of createChat.
+  const open = confirm(
+    t("chat.config_required_title") + "\n\n" +
+    t("chat.config_required_msg", { backend: backendName }) + "\n\n" +
+    "[" + t("chat.config_required_open") + " / " + t("chat.config_required_cancel") + "]"
+  );
+  if (open) {
+    await openAppSettings();
+    // Focus the first empty input in the upstream group so the user can
+    // start typing right away.
+    setTimeout(() => {
+      const wrap = document.getElementById("setting-api-keys");
+      if (!wrap) return;
+      wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+      const first = wrap.querySelector('.api-key-input[data-backend=""]');
+      if (first) first.focus();
+    }, 50);
+  }
+  return false;
+}
+
 async function createChat(backend, modelId) {
+  if (!(await ensureUpstreamConfigured(backend.name))) return;
   let r;
   try {
     r = await api("POST", "/api/conversations", { backend: backend.name, model: modelId || backend.name });
@@ -1013,6 +1066,7 @@ async function renderApiKeysSection() {
       members: [
         { env: "LLM_BASE_URL", labelKey: "settings.api_keys_field_base_url", type: "text" },
         { env: "LLM_API_KEY",  labelKey: "settings.api_keys_field_api_key",  type: "password" },
+        { env: "LLM_MODEL",    labelKey: "settings.api_keys_field_model",    type: "text" },
       ],
     },
   ];
