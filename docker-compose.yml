@@ -1,0 +1,55 @@
+services:
+  agent-stack-router:
+    build: ./router
+    image: agent-stack-router:latest
+    container_name: agent-stack-router
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      STACK_DATA_ROOT: ${STACK_DATA_ROOT:-/data}
+      USERS_ROOT: ${STACK_DATA_ROOT:-/data}/users
+      SEEDS_ROOT: ${STACK_DATA_ROOT:-/data}/seeds
+      DB_PATH: ${STACK_DATA_ROOT:-/data}/router.db
+      BACKENDS_CONFIG_PATH: ${STACK_DATA_ROOT:-/data}/backends.json
+      HOST_STACK_ROOT: ${HOST_STACK_ROOT}
+
+      ROUTER_BIND_HOST: ${ROUTER_BIND_HOST:-127.0.0.1}
+      ROUTER_PORT: ${ROUTER_PORT:-18080}
+      ROUTER_PUBLIC_BASE_URL: ${ROUTER_PUBLIC_BASE_URL:-}
+
+      JWT_SECRET: ${JWT_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALLOW_SIGNUP: ${ALLOW_SIGNUP:-true}
+      INVITE_CODE: ${INVITE_CODE:-}
+
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-Admin}
+
+      DEFAULT_IDLE_SECONDS: ${DEFAULT_IDLE_SECONDS:-600}
+      REAPER_INTERVAL_SECONDS: ${REAPER_INTERVAL_SECONDS:-30}
+
+      BACKEND_BIND_HOST: 127.0.0.1
+      BACKEND_PORT_START: ${BACKEND_PORT_START:-19000}
+      BACKEND_PORT_END: ${BACKEND_PORT_END:-19999}
+      BACKEND_STARTUP_TIMEOUT: ${BACKEND_STARTUP_TIMEOUT:-90}
+
+      # NOTE: upstream LLM credentials are NOT injected from process env.
+      # Admin sets them in the web UI (Settings -> Backend API keys -> Global)
+      # and toggles "share with users" so other users can inherit them.
+    volumes:
+      - ${HOST_STACK_ROOT}:${STACK_DATA_ROOT:-/data}
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  agent-stack-frontend:
+    build: ./frontend
+    image: agent-stack-frontend:latest
+    container_name: agent-stack-frontend
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - agent-stack-router
+    environment:
+      FRONTEND_BIND_HOST: ${FRONTEND_BIND_HOST:-0.0.0.0}
+      FRONTEND_PORT: ${FRONTEND_PORT:-18000}
+      ROUTER_INTERNAL_URL: http://127.0.0.1:${ROUTER_PORT:-18080}

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Optional chromium wrapper used by the OpenClaw `browser` plugin.
+#
+# - If CHROMIUM_PROXY is set (e.g. "http://127.0.0.1:1081"), all browser
+#   traffic goes through it. Set CHROMIUM_PROXY_BYPASS to a chromium
+#   bypass list (semicolon separated) for local/internal hosts.
+# - Always clears stale SingletonLock files so a previous crash doesn't
+#   make the next launch self-exit.
+#
+# Drop CHROMIUM_PROXY in your env (or unset it) for a plain direct browser.
+
+# Strip Chromium's --user-data-dir=... arg so we can clear its stale locks.
+for arg in "$@"; do
+  case "$arg" in
+    --user-data-dir=*) UDD="${arg#--user-data-dir=}" ;;
+  esac
+done
+if [ -n "$UDD" ] && [ -d "$UDD" ]; then
+  rm -f "$UDD/SingletonLock" "$UDD/SingletonCookie" "$UDD/SingletonSocket" 2>/dev/null
+fi
+
+if [ -n "$CHROMIUM_PROXY" ]; then
+  if [ -n "$CHROMIUM_PROXY_BYPASS" ]; then
+    exec /usr/bin/chromium --proxy-server="$CHROMIUM_PROXY" --proxy-bypass-list="$CHROMIUM_PROXY_BYPASS" "$@"
+  else
+    exec /usr/bin/chromium --proxy-server="$CHROMIUM_PROXY" "$@"
+  fi
+else
+  exec /usr/bin/chromium "$@"
+fi

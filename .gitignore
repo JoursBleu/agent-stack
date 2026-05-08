@@ -1,0 +1,42 @@
+# env / secrets
+.env
+.env.local
+*.env
+# but seed dotfiles need to ship (they only contain ${VAR} placeholders)
+!seeds/**/.env
+
+# router data
+data/
+users/
+*.db
+*.db-shm
+*.db-wal
+
+# images: ignore built tarballs / blobs by default, but ship the per-image
+# build context that lives under images/<name>/
+images/*
+!images/openclaw/
+!images/openclaw/**
+*.tar
+*.tar.gz
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# node (in case we add tooling later)
+node_modules/
+
+# misc
+*.log

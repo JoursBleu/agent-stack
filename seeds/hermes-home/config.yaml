@@ -1,0 +1,51 @@
+# Hermes config for agent-stack: route every model call to the configured
+# OpenAI-compatible upstream. ${LLM_BASE_URL} / ${LLM_API_KEY} are filled in
+# at seed-render time from process env or per-user override.
+
+model:
+  default: "gpt-5-mini"
+  provider: "custom"
+  base_url: "${LLM_BASE_URL}"
+
+auxiliary:
+  vision:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  web_extract:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  compression:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  session_search:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  skills_hub:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  approval:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  mcp:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  flush_memories:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+  title_generation:
+    provider: "custom"
+    model: "gpt-5-mini"
+    base_url: "${LLM_BASE_URL}"
+
+delegation:
+  model: "gpt-5-mini"
+  provider: "custom"
+  base_url: "${LLM_BASE_URL}"

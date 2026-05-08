@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Stack</title>
+<meta name="color-scheme" content="light dark" />
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem("ags.theme") || "auto";
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      var l = localStorage.getItem("ags.lang") || "en";
+      document.documentElement.setAttribute("lang", l === "zh" ? "zh-CN" : "en");
+    } catch (_) {}
+  })();
+</script>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<!-- Auth view -->
+<div id="auth-view" class="view hidden">
+  <div class="auth-card">
+    <h1>Agent Stack</h1>
+    <div class="auth-tabs">
+      <button data-tab="login" class="auth-tab active" data-i18n="auth.login">Sign in</button>
+      <button data-tab="signup" class="auth-tab" data-i18n="auth.signup">Sign up</button>
+    </div>
+    <form id="auth-form">
+      <input type="email" id="auth-email" required data-i18n-placeholder="auth.email_ph" placeholder="Email" />
+      <input type="text" id="auth-name" class="signup-only hidden" data-i18n-placeholder="auth.name_ph" placeholder="Name (optional)" />
+      <input type="password" id="auth-password" required data-i18n-placeholder="auth.password_ph" placeholder="Password (>= 8 chars)" />
+      <input type="text" id="auth-invite" class="signup-only hidden" data-i18n-placeholder="auth.invite_ph" placeholder="Invite code (if required)" />
+      <div class="auth-error" id="auth-error"></div>
+      <button type="submit" id="auth-submit" data-i18n="auth.submit_login">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<!-- App view -->
+<div id="app-view" class="view hidden">
+  <aside id="sidebar">
+    <div id="model-picker" class="model-picker hidden" hidden>
+      <div class="picker-title" data-i18n="sidebar.pick_backend">Pick a backend</div>
+      <div id="model-options"></div>
+    </div>
+
+    <div id="sb-list">
+      <div class="sb-section-title" data-i18n="sidebar.chat_history">Conversations</div>
+      <div id="backends-list"></div>
+    </div>
+
+    <div id="sb-footer">
+      <div class="sb-user-row">
+        <span id="user-display" class="sb-user-name"></span>
+      </div>
+    </div>
+  </aside>
+
+  <main id="chat-pane">
+    <header id="chat-header">
+      <div class="ch-left">
+        <div id="chat-title" data-i18n="chat.empty_title">Select a conversation or start a new one</div>
+        <div id="chat-meta"></div>
+      </div>
+      <div class="ch-actions">
+        <button id="admin-btn" class="hidden" data-i18n-title="sidebar.admin" title="Users">⚭</button>
+        <button id="settings-btn" data-i18n-title="sidebar.settings" title="Settings">⚙</button>
+        <button id="logout-btn" data-i18n-title="sidebar.logout" title="Sign out">↩</button>
+      </div>
+    </header>
+
+    <div id="messages-wrap">
+      <div id="messages"></div>
+    </div>
+
+    <div id="composer-wrap">
+      <form id="composer">
+        <textarea id="composer-input" rows="1" disabled
+                  data-i18n-placeholder="chat.composer_ph"
+                  placeholder="Send a message…"></textarea>
+        <button type="submit" id="composer-send" disabled
+                data-i18n-title="chat.send" title="Send">↑</button>
+      </form>
+      <div class="composer-hint" data-i18n="chat.composer_hint">Enter to send · Shift+Enter for newline</div>
+    </div>
+  </main>
+
+  <aside id="settings-panel" class="hidden">
+    <div class="sp-header">
+      <h2 data-i18n="backend_settings.title">Backend settings</h2>
+      <button id="settings-close">×</button>
+    </div>
+    <div id="settings-body"></div>
+  </aside>
+</div>
+
+<!-- App settings modal: theme + language -->
+<div id="app-settings-modal" class="modal hidden">
+  <div class="modal-card modal-card--sm">
+    <div class="modal-header">
+      <h2 data-i18n="settings.title">Settings</h2>
+      <button id="app-settings-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="setting-row">
+        <label data-i18n="settings.theme">Theme</label>
+        <select id="setting-theme">
+          <option value="auto" data-i18n="settings.theme_auto">Follow system</option>
+          <option value="light" data-i18n="settings.theme_light">Light</option>
+          <option value="dark"  data-i18n="settings.theme_dark">Dark</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label data-i18n="settings.language">Language</label>
+        <select id="setting-lang">
+          <option value="en">English</option>
+          <option value="zh">中文</option>
+        </select>
+      </div>
+      <div class="setting-section">
+        <h3 data-i18n="settings.api_keys_title">Backend API keys</h3>
+        <p class="setting-hint" data-i18n="settings.api_keys_hint">Leave a field empty to use the shared default key. Saving a key restarts your runner so the new value takes effect on next chat.</p>
+        <div id="setting-api-keys"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Admin modal -->
+<div id="admin-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 data-i18n="admin.title">User management</h2>
+      <button id="admin-close">×</button>
+    </div>
+    <div class="modal-body">
+      <form id="admin-create-form" class="admin-create-form">
+        <input name="email" type="email" required data-i18n-placeholder="admin.ph_email" placeholder="Email" />
+        <input name="name" data-i18n-placeholder="admin.ph_name" placeholder="Name (optional)" />
+        <input name="password" type="password" required minlength="6" data-i18n-placeholder="admin.ph_password" placeholder="Initial password >= 6" />
+        <button type="submit" data-i18n="admin.create_btn">Create user</button>
+      </form>
+      <div id="admin-create-error" class="auth-error"></div>
+      <table id="admin-users-table">
+        <thead>
+          <tr>
+            <th data-i18n="admin.col_email">Email</th>
+            <th data-i18n="admin.col_name">Name</th>
+            <th data-i18n="admin.col_created">Created</th>
+            <th data-i18n="admin.col_actions">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="admin-users-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>

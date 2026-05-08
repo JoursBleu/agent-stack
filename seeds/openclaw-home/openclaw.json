@@ -1,0 +1,136 @@
+{
+  "models": {
+    "providers": {
+      "upstream": {
+        "baseUrl": "${LLM_BASE_URL}",
+        "apiKey": "${LLM_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gpt-5-mini",
+            "name": "GPT-5 mini",
+            "maxTokens": 8192,
+            "contextWindow": 200000,
+            "reasoning": true
+          },
+          {
+            "id": "gpt-4.1",
+            "name": "GPT-4.1",
+            "maxTokens": 8192,
+            "contextWindow": 1000000,
+            "reasoning": false
+          },
+          {
+            "id": "gpt-4o-mini",
+            "name": "GPT-4o mini",
+            "maxTokens": 8192,
+            "contextWindow": 128000,
+            "reasoning": false
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "main",
+        "name": "default",
+        "tools": {
+          "elevated": {
+            "enabled": false
+          }
+        }
+      },
+      {
+        "id": "researcher",
+        "name": "Researcher",
+        "tools": {
+          "elevated": {
+            "enabled": false
+          }
+        }
+      },
+      {
+        "id": "coder",
+        "name": "Coder",
+        "tools": {
+          "elevated": {
+            "enabled": false
+          }
+        }
+      }
+    ],
+    "defaults": {
+      "model": {
+        "primary": "upstream/gpt-5-mini"
+      },
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "llm": {
+        "idleTimeoutSeconds": 300
+      }
+    }
+  },
+  "tools": {
+    "elevated": {
+      "enabled": false
+    },
+    "web": {
+      "search": {
+        "enabled": false
+      },
+      "fetch": {
+        "enabled": false
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "custom",
+    "customBindHost": "0.0.0.0",
+    "port": 17567,
+    "controlUi": {
+      "allowInsecureAuth": true,
+      "dangerouslyDisableDeviceAuth": true,
+      "allowedOrigins": [
+        "*"
+      ]
+    },
+    "auth": {
+      "mode": "token"
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        },
+        "responses": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "channels": {},
+  "plugins": {
+    "entries": {
+      "browser": {
+        "enabled": true
+      }
+    },
+    "allow": [
+      "browser",
+      "memory-core"
+    ]
+  },
+  "browser": {
+    "enabled": true,
+    "executablePath": "/usr/local/bin/chromium-proxied",
+    "headless": true,
+    "noSandbox": true,
+    "ssrfPolicy": {
+      "dangerouslyAllowPrivateNetwork": false
+    }
+  }
+}
