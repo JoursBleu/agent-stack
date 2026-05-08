@@ -95,24 +95,44 @@ backend containers.
 git clone https://github.com/JoursBleu/agent-stack.git
 cd agent-stack
 
+# 1. Configure .env. The router will refuse to start if JWT_SECRET or
+#    BOOTSTRAP_ADMIN_PASSWORD still look like the CHANGE_ME placeholders.
 cp .env.example .env
-# edit .env: set HOST_STACK_ROOT, JWT_SECRET, BOOTSTRAP_ADMIN_*
-# (the router does NOT read LLM_BASE_URL / LLM_API_KEY / LLM_MODEL from .env any more —
-#  the bootstrap admin saves them in the web UI after first login; see step
-#  "Seed the upstream LLM key" below)
+sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|" .env
+$EDITOR .env  # set BOOTSTRAP_ADMIN_EMAIL / _PASSWORD; HOST_STACK_ROOT
+              # MUST be an absolute path (default /var/lib/agent-stack)
+# Note: router does NOT read LLM_BASE_URL / LLM_API_KEY / LLM_MODEL from
+# .env. The bootstrap admin saves them in the web UI after first login
+# (see "Seed the upstream LLM key" below).
 
-# stage data dir (only mkdir is required; backends.json and seeds/
-# are bind-mounted into the router straight from this checkout)
+# 2. Create the data dir. Only mkdir is needed; backends.json and seeds/
+#    are bind-mounted from this checkout into the router, so future
+#    upgrades are just `git pull && docker compose up -d`.
 DATA=$(grep ^HOST_STACK_ROOT .env | cut -d= -f2)
-mkdir -p "$DATA"
+sudo mkdir -p "$DATA" && sudo chown $USER "$DATA"
 
-# Provide an OpenClaw image — see "OpenClaw image" below for two options
-docker pull openclaw/openclaw:latest
-# (or build the overlay: see images/openclaw/README.md)
+# 3. Pull the OpenClaw backend image. docker compose only builds router
+#    and frontend — it does NOT auto-pull backend images, so you must
+#    do this once. The image lives on GHCR (it is NOT mirrored to
+#    Docker Hub; `docker pull openclaw/openclaw` would 404).
+docker pull ghcr.io/openclaw/openclaw:latest
+# Or build the desktop-Chromium overlay shipped in this repo:
+#   cd images/openclaw && docker build -t openclaw-with-chromium:latest .
 
+# 4. Build + start router and frontend.
 docker compose up -d --build
 docker compose logs -f agent-stack-router
+
+# 5. Smoke check: should print {"ok":true,...}
+curl -fsS http://127.0.0.1:18080/healthz
 ```
+
+> **Multiple checkouts on the same host?** docker compose isolates per
+> project (= directory name) automatically; we deliberately do NOT pin
+> `container_name:` in `docker-compose.yml`. But each checkout's
+> `HOST_STACK_ROOT` must be a distinct absolute path, and the
+> `ROUTER_PORT` / `FRONTEND_PORT` / `BACKEND_PORT_START..END` ranges in
+> `.env` must not overlap.
 
 Open `http://<host>:18000/`, log in with the bootstrap admin (signup is
 allowed when `ALLOW_SIGNUP=true`, but signup always creates a regular
@@ -140,8 +160,9 @@ Equivalent REST (admin's own session cookie):
 BASE=http://<host>:18000
 JAR=/tmp/admin.jar
 # 1) login as bootstrap admin and grab a session cookie
+read -srp 'admin password: ' ADMIN_PW; echo
 curl -s -c $JAR -H 'Content-Type: application/json' \
-     -d '{"email":"admin@local","password":"changeme"}' $BASE/auth/login
+     -d "{\"email\":\"admin@local\",\"password\":\"$ADMIN_PW\"}" $BASE/auth/login
 
 # 2) save the global values
 curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
@@ -233,14 +254,16 @@ backend at the upstream tag:
 
 ```jsonc
 // backends.json
-{ "image": "openclaw/openclaw:latest" }
+{ "image": "ghcr.io/openclaw/openclaw:latest" }
 ```
 
 ```bash
-docker pull openclaw/openclaw:latest
+docker pull ghcr.io/openclaw/openclaw:latest
 ```
 
-See [openclaw/openclaw](https://github.com/openclaw/openclaw) for tags and
+The image lives on GHCR; it is **not** mirrored to Docker Hub, so
+`docker pull openclaw/openclaw` will 404. See
+[openclaw/openclaw](https://github.com/openclaw/openclaw) for tags and
 build matrix.
 
 ### Option B — build the thin overlay shipped in this repo
