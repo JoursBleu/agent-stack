@@ -76,24 +76,37 @@ agent-stack/
 git clone https://github.com/JoursBleu/agent-stack.git
 cd agent-stack
 
+# 1. 配置 .env。JWT_SECRET 和 BOOTSTRAP_ADMIN_PASSWORD 仍是 CHANGE_ME 占位时
+#    router 会拒绝启动。
 cp .env.example .env
-# 编辑 .env：HOST_STACK_ROOT、JWT_SECRET、BOOTSTRAP_ADMIN_*
-# router 不再从 .env 读 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL；它们由 bootstrap admin
-# 首次登录后在网页 Settings → Backend API keys 里保存（见下方"配置上游 key"）
+sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|" .env
+$EDITOR .env  # 改 BOOTSTRAP_ADMIN_EMAIL / _PASSWORD；HOST_STACK_ROOT 必须
+              # 是绝对路径（默认 /var/lib/agent-stack）
 
-# stage 数据目录（只需要 mkdir；backends.json 和 seeds/ 由 docker compose
-# 从本仓库直接 bind-mount 进 router 容器）
+# 2. 创建数据目录。只需要 mkdir；backends.json 和 seeds/ 由 docker compose
+#    从仓库直接 bind-mount 进 router 容器，所以 git pull 之后无需手动 cp。
 DATA=$(grep ^HOST_STACK_ROOT .env | cut -d= -f2)
-mkdir -p "$DATA"
+sudo mkdir -p "$DATA" && sudo chown $USER "$DATA"
 
-# 准备 OpenClaw 镜像（见下面"OpenClaw 镜像"）
-docker pull openclaw/openclaw:latest
-# 或者 build 本仓库自带的 Chromium 加层：
+# 3. 拉 OpenClaw 后端镜像。docker compose 只 build router/frontend，**不会**
+#    自动拉后端镜像，第一次必须手动拉。
+docker pull ghcr.io/openclaw/openclaw:latest
+# 或 build 本仓库带桌面 Chromium 的加层：
 #   cd images/openclaw && docker build -t openclaw-with-chromium:latest .
 
+# 4. 启动 router + frontend。
 docker compose up -d --build
-docker compose logs -f agent-stack-router
+docker compose logs -f router
+
+# 5. Smoke check：应输出 {"ok":true}
+curl -fsS http://127.0.0.1:18080/healthz
 ```
+
+> **同机多 checkout？** docker compose 按目录名做 project 自动隔离容器，
+> 我们故意**没有**在 `docker-compose.yml` 里硬编码 `container_name:`。
+> 但每个 checkout 的 `HOST_STACK_ROOT` 必须是不同的绝对路径，并在
+> `.env` 里给 `ROUTER_PORT` / `FRONTEND_PORT` /
+> `BACKEND_PORT_START..END` 分配不冲突的端口段。
 
 打开 `http://<host>:18000/`，用 bootstrap admin 登录。signup 在
 `ALLOW_SIGNUP=true` 时也能用，但**注册出来的永远只能是普通 user**——系
@@ -252,3 +265,55 @@ docker build -t openclaw-with-chromium:latest .
 ## License
 
 [MIT](./LICENSE)
+
+
+## 调上游模型清单
+
+seed 文件里 `${LLM_MODEL}` 占位只声明了一个上游模型。要暴露多个：
+
+- OpenClaw：编辑 [seeds/openclaw-home/openclaw.json](seeds/openclaw-home/openclaw.json)
+  的 `models.providers.upstream.models[]`。
+- Hermes：[seeds/hermes-home/config.yaml](seeds/hermes-home/config.yaml)
+  里每个 sub-component（vision/web_extract/compression/...）都是一个
+  `${LLM_MODEL}`，可分别替换成任意字面 id 或别的 env 占位。
+
+改完 `git pull && docker compose up -d` 推到 router 容器，但**已经在
+跑的 per-user runner 仍用旧 seed**。要让它生效，停掉这个 runner 让它
+重 spawn（见下节）。
+
+## 配置变更后回收 runner
+
+在 UI 里改 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 立即写 DB，
+但已经在跑的容器是用旧值渲染的 seed 启动的。router 只在新建 runner
+时才重新渲染 `templated_files`，所以要主动回收：
+
+```bash
+BASE=http://127.0.0.1:18000
+curl -s -X DELETE -b $JAR $BASE/api/runners/openclaw
+curl -s -X POST   -b $JAR $BASE/api/runners/openclaw/start
+```
+
+或等 idle reaper（`DEFAULT_IDLE_SECONDS`，默认 600s）回收。
+
+## 排错
+
+| 现象 | 多半的原因 | 怎么看 |
+|---|---|---|
+| `pull access denied for openclaw/openclaw` | 走错 registry，应在 GHCR | `docker pull ghcr.io/openclaw/openclaw:latest` |
+| spawn 几秒后报 `runner not ready: Connection refused` | 后端容器启动失败（seed 字段不匹配镜像版本 / 镜像没拉 / OOM 等） | `docker logs agstack-<backend>-<user-slug>` |
+| spawn 成功，但 `/v1/chat/completions` 返回 404/400 | `${LLM_MODEL}` 不是上游真支持的 id | `curl -H 'Authorization: Bearer $LLM_API_KEY' $LLM_BASE_URL/models` 后到 *Settings → Backend API keys* 改值 |
+| 多 checkout 互相覆盖容器 | 旧版 `docker-compose.yml` 硬编码了 `container_name:`，已删除 | `git diff docker-compose.yml` |
+| router 启动报 `JWT_SECRET looks like the placeholder` | `.env` 还是 `CHANGE_ME_TO_RANDOM_HEX` | `sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|" .env` |
+
+## 卸载 / 重置
+
+```bash
+cd agent-stack
+docker compose down                 # 停 router + frontend
+# router 动态拉起的 per-user 后端容器不在 compose 里，单独清掉：
+docker ps -a --filter name=agstack- --format '{{.Names}}' | xargs -r docker rm -f
+# 抹掉所有持久化状态（用户、DB、per-user home）—— 不可逆
+sudo rm -rf "$(grep ^HOST_STACK_ROOT .env | cut -d= -f2)"
+# 视情况清掉 router/frontend 镜像：
+docker image rm agent-stack-router:latest agent-stack-frontend:latest
+```

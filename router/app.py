@@ -108,6 +108,11 @@ ROUTER_PUBLIC_BASE_URL = os.getenv("ROUTER_PUBLIC_BASE_URL", "")
 JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
 if not JWT_SECRET:
     raise RuntimeError("JWT_SECRET is required")
+if JWT_SECRET.startswith("CHANGE_ME") or len(JWT_SECRET) < 32:
+    raise RuntimeError(
+        "JWT_SECRET looks like the placeholder or is too short (<32 chars). "
+        "Generate one with `openssl rand -hex 48` and put it in .env."
+    )
 JWT_TTL_SECONDS = env_int("JWT_TTL_SECONDS", 7 * 24 * 3600)
 COOKIE_NAME = os.getenv("COOKIE_NAME", "agent_stack_session")
 COOKIE_SECURE = env_bool("COOKIE_SECURE", False)
@@ -1021,6 +1026,11 @@ def bootstrap_admin() -> None:
     admin_pw = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "").strip()
     if not (admin_email and admin_pw):
         return
+    if admin_pw.startswith("CHANGE_ME") or admin_pw == "changeme" or len(admin_pw) < 12:
+        raise RuntimeError(
+            "BOOTSTRAP_ADMIN_PASSWORD looks like the placeholder or is too "
+            "short (<12 chars). Set a real password in .env before first boot."
+        )
     if find_user_by_email(admin_email):
         return
     if count_admins() > 0:

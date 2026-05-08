@@ -317,6 +317,23 @@ the overlay (drop the proxy wrapper / sudo / fonts you don't need).
 substituted from the merged env (router process env + per-user override)
 when the seed is copied into / re-rendered for a user's home.
 
+### Two layers of "model"
+
+`backends.json` `extra_models` and the seed file's
+`models.providers.<provider>.models[]` are **two different lists**:
+
+| List | Where | Effect |
+|---|---|---|
+| `extra_models` (e.g. `openclaw/main`) | `backends.json` | Router-side aliases. Determines what `/v1/models` returns and which model strings the router will accept and route to this backend. **Never sent upstream.** |
+| `models.providers.upstream.models[]` (e.g. `${LLM_MODEL}`) | `seeds/<backend>-home/openclaw.json` (and similarly for hermes' `config.yaml`) | What the backend itself thinks it can call. The id placed here is what the backend will actually pass to `LLM_BASE_URL/v1/chat/completions`. |
+
+When the user picks model `openclaw` (or `openclaw/main`) in the UI, the
+router routes the request to the openclaw container, but the container
+still calls `LLM_MODEL` (default: whatever the admin set in the UI)
+upstream. To expose more upstream models per backend, edit the seed
+file (and recycle the per-user runner so the new template is rendered
+— see *Tuning the upstream model list* below).
+
 ## API
 
 All endpoints under `/api/*` and `/v1/*` require a session (cookie set
@@ -399,6 +416,66 @@ by `POST /auth/login`).
 - Conversation messages are stored unencrypted in `router.db`.
 - Per-user upstream keys are stored **plaintext** in `user_env_overrides`.
   Encrypt the volume or wrap with KMS if your threat model needs it.
+
+## Tuning the upstream model list
+
+The `${LLM_MODEL}` placeholder in the seed files only declares **one**
+upstream model. To expose more (e.g. let users switch between a fast and
+a slow model in the OpenClaw UI), edit the seed file directly:
+
+- OpenClaw: [seeds/openclaw-home/openclaw.json](seeds/openclaw-home/openclaw.json)
+  → add more entries under `models.providers.upstream.models[]`.
+- Hermes: [seeds/hermes-home/config.yaml](seeds/hermes-home/config.yaml)
+  has a single `${LLM_MODEL}` per sub-component (vision, web_extract,
+  compression, ...); replace any of them with a literal id (or another
+  env placeholder) if you want sub-components on different upstream
+  models.
+
+After editing, `git pull && docker compose up -d` is enough to push the
+template into the router container, but **already-spawned per-user
+runners keep their previously rendered seed**. Force a re-render by
+recycling the user's runner (next section).
+
+## Recycling a runner after a config change
+
+Changing `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` in the UI updates
+the DB immediately, but the per-user backend container that's already
+running was started with the old values baked into its rendered seed
+files. The router only re-renders `templated_files` on the next
+`ensure()` call, and `ensure()` is a no-op when a runner exists. To
+force it:
+
+```bash
+BASE=http://127.0.0.1:18000
+curl -s -X DELETE -b $JAR $BASE/api/runners/openclaw       # stop+remove
+curl -s -X POST   -b $JAR $BASE/api/runners/openclaw/start # respawn
+```
+
+Or wait for the idle reaper (`DEFAULT_IDLE_SECONDS`, default 600s).
+
+## Troubleshooting
+
+| Symptom | Likely cause | Where to look |
+|---|---|---|
+| `pull access denied for openclaw/openclaw` | Wrong registry. The image is on GHCR. | `docker pull ghcr.io/openclaw/openclaw:latest` |
+| `runner not ready: Connection refused` after a few seconds | The spawned backend container exited during startup (bad seed config, missing image, OOM, ...). | `docker logs agstack-<backend>-<user-slug>` |
+| Spawn works but `/v1/chat/completions` returns 404 / 400 from upstream | The `${LLM_MODEL}` value isn't a model id the upstream actually serves. | `curl -H 'Authorization: Bearer $LLM_API_KEY' $LLM_BASE_URL/models` and reset the override in *Settings → Backend API keys*. |
+| Two checkouts on the same host fight for the same container | Old hard-coded `container_name`. We removed it; on upgrade make sure your `docker-compose.yml` no longer pins `container_name:`. | `git diff docker-compose.yml` |
+| Router refuses to start with `JWT_SECRET looks like the placeholder` | `.env` still has `CHANGE_ME_TO_RANDOM_HEX`. | `sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|" .env` |
+
+## Uninstall / reset
+
+```bash
+cd agent-stack
+docker compose down                 # stop router + frontend
+# Reap every per-user backend the router spawned (they're not in the
+# compose file because they're created dynamically):
+docker ps -a --filter name=agstack- --format '{{.Names}}' | xargs -r docker rm -f
+# Wipe all persistent state (users, DB, per-user homes). DESTRUCTIVE.
+sudo rm -rf "$(grep ^HOST_STACK_ROOT .env | cut -d= -f2)"
+# Optionally drop the router/frontend images too:
+docker image rm agent-stack-router:latest agent-stack-frontend:latest
+```
 
 ## License
 

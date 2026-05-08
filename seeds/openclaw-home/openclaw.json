@@ -53,9 +53,6 @@
       },
       "compaction": {
         "mode": "safeguard"
-      },
-      "llm": {
-        "idleTimeoutSeconds": 300
       }
     }
   },

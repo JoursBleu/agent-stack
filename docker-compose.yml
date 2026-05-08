@@ -2,7 +2,6 @@ services:
   agent-stack-router:
     build: ./router
     image: agent-stack-router:latest
-    container_name: agent-stack-router
     restart: unless-stopped
     network_mode: host
     environment:
@@ -52,7 +51,6 @@ services:
   agent-stack-frontend:
     build: ./frontend
     image: agent-stack-frontend:latest
-    container_name: agent-stack-frontend
     restart: unless-stopped
     network_mode: host
     depends_on:
