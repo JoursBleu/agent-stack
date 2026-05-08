@@ -411,14 +411,48 @@ by `POST /auth/login`).
    `${ENV_VAR}` placeholders for any secrets — they're substituted at
    copy time from the router's environment, and re-rendered every
    `ensure()` if the file is listed in `templated_files`.
+   **Caveat**: the entire `seeds/<seed_subdir>/` tree is copied into
+   every user's home on first run, so do NOT put large blobs (model
+   weights, datasets) in there — keep it config-only.
 2. Append a backend entry to `backends.json` (see schema above). For
    agents that derive their own session id from the request body
    (e.g. Hermes hashes `system_prompt + first_user_message`), the
    router auto-injects `X-Hermes-Session-Id` from the OpenAI `user`
    field so each conversation maps to a unique session — see
    [docs/hermes-integration.md](docs/hermes-integration.md).
-3. Restart `agent-stack-router`. New backends show up in
-   `/api/backends` and the SPA's model picker immediately.
+3. Restart `agent-stack-router` so it reloads `backends.json`. The router
+   does **not** hot-reload `backends.json` — `image`, `extra_networks`,
+   `extra_env`, `templated_files`, etc. are read once at startup. After
+   editing, run `docker compose restart agent-stack-router`. New
+   backends then show up in `/api/backends` and the SPA's model picker
+   immediately.
+
+### Sidecar example: backend talks to a same-host LLM proxy
+
+If `LLM_BASE_URL` points at another container on the same Docker host
+(e.g. an `openai-compat-proxy` listening on its own bridge network),
+the spawned per-user runner needs to be on that network — `network_mode:
+host` only applies to the router/frontend, not to backend runners.
+
+```jsonc
+// backends.json
+{
+  "name": "openclaw",
+  "image": "ghcr.io/openclaw/openclaw:latest",
+  "extra_networks": ["my-llm-proxy_default"],
+  "extra_env": {
+    // resolved by the proxy container's DNS name on that bridge:
+    "LLM_BASE_URL": "http://openai-compat-proxy:8080/v1"
+  }
+}
+```
+
+The router writes a row in the docker network's container table, so
+inside the runner `getent hosts openai-compat-proxy` resolves and
+`curl http://openai-compat-proxy:8080/v1/models` works. Without
+`extra_networks`, every spawned runner lands on the default `bridge`
+network and **can't reach any sidecar by name** (only public DNS
+endpoints work).
 
 ## Docs
 
@@ -490,6 +524,22 @@ Or wait for the idle reaper (`DEFAULT_IDLE_SECONDS`, default 600s).
 | Spawn works but `/v1/chat/completions` returns 404 / 400 from upstream | The `${LLM_MODEL}` value isn't a model id the upstream actually serves. | `curl -H 'Authorization: Bearer $LLM_API_KEY' $LLM_BASE_URL/models` and reset the override in *Settings → Backend API keys*. |
 | Two checkouts on the same host fight for the same container | Old hard-coded `container_name`. We removed it; on upgrade make sure your `docker-compose.yml` no longer pins `container_name:`. | `git diff docker-compose.yml` |
 | Router refuses to start with `JWT_SECRET looks like the placeholder` | `.env` still has `CHANGE_ME_TO_RANDOM_HEX`. | `sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|" .env` |
+| First `POST /api/runners/<backend>/start` times out at ~90 s with `runner not ready` | `docker compose up` does **not** auto-pull backend images (they aren't compose services), and a 1-2 GB image pull blows past `BACKEND_STARTUP_TIMEOUT`. | Run `docker pull` for every `image` in `backends.json` once, or set `BACKEND_PREPULL_AT_STARTUP=true` in `.env` to make the router pre-pull on boot. |
+| Backend runner cannot reach `LLM_BASE_URL` even though `curl` from the host works | The runner container is on the default `bridge` network; same-host sidecars are only reachable by container DNS name when both are on the same user-defined network. | Add the sidecar's network to `extra_networks` in `backends.json` (see "Sidecar example" above) and restart the router. |
+| Backend runner stays "running" in the SPA after it crashed | Status is refreshed by the idle reaper (`REAPER_INTERVAL_SECONDS`, default 30 s). | Wait ≤30 s, or curl `DELETE /api/runners/<backend>` to force-clean. |
+
+## Backup vs reset
+
+`router.db` is sqlite + WAL, so the on-disk file is normally accompanied
+by `router.db-wal` and `router.db-shm` containing un-checkpointed
+transactions. **Do not** copy `router.db` alone for backup; either
+`docker compose stop agent-stack-router` first, or use:
+
+```bash
+sqlite3 "$HOST_STACK_ROOT/router.db" ".backup /tmp/router-$(date +%F).db"
+```
+
+For full removal:
 
 ## Uninstall / reset
 

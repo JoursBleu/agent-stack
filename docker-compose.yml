@@ -34,6 +34,7 @@ services:
       BACKEND_PORT_START: ${BACKEND_PORT_START:-19000}
       BACKEND_PORT_END: ${BACKEND_PORT_END:-19999}
       BACKEND_STARTUP_TIMEOUT: ${BACKEND_STARTUP_TIMEOUT:-90}
+      BACKEND_PREPULL_AT_STARTUP: ${BACKEND_PREPULL_AT_STARTUP:-false}
 
       # NOTE: upstream LLM credentials are NOT injected from process env.
       # Admin sets them in the web UI (Settings -> Backend API keys -> Global)
@@ -49,6 +50,15 @@ services:
       - ./backends.json:${STACK_DATA_ROOT:-/data}/backends.json:ro
       - ./seeds:${STACK_DATA_ROOT:-/data}/seeds:ro
       - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      # Quick liveness probe so `docker compose ps` does not claim "Up"
+      # before FastAPI accepts connections, and so other services using
+      # depends_on.condition: service_healthy can wait correctly.
+      test: ["CMD", "python3", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('ROUTER_PORT','18080')+'/healthz', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
 
   agent-stack-frontend:
     build: ./frontend

@@ -89,10 +89,17 @@ agent-stack 的对策（`v1_proxy`）：
 
 ```python
 # router 在转发到 hermes-agent 时把 OpenAI `user` 字段（前端填的
-# "agstack-<conv_id>"）拆出来，写到 X-Hermes-Session-Id
-if backend_def.name == "hermes-agent" and user_field:
-    headers["X-Hermes-Session-Id"] = user_field
+# "agstack-<conv_id>"）拆出来，写到 X-Hermes-Session-Id。
+# 客户端没传 user（裸 OpenAI SDK 等）时退化到 per-user 会话隔离，
+# 保证不同登录用户绝不会共享 hermes context。
+if backend_def.name == "hermes-agent":
+    headers["X-Hermes-Session-Id"] = user_field or f"agstack-u{user['id']}"
 ```
+
+> **客户端注意**：要让同一用户的不同对话不互相污染，调用
+> `/v1/chat/completions` 时必须传 `user="agstack-<conv_id>"`。SPA 已经
+> 这样做；裸 OpenAI Python SDK / curl 默认不传 `user`，会落到该用户的
+> 单一 fallback session（`agstack-u<user_id>`），多对话仍会串话。
 
 每个前端对话 → 唯一 hermes session：
 

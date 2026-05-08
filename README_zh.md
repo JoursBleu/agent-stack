@@ -243,6 +243,42 @@ docker build -t openclaw-with-chromium:latest .
 主要 env 见 `.env.example`；`backends.json` schema 和 API 列表见
 [英文 README](./README.md#configuration)。
 
+## 添加新 backend
+
+1. 在 `seeds/<seed_subdir>/` 下放该 backend 的 per-user 模板（`${ENV_VAR}`
+   占位会在 `ensure()` 时按 router env / 用户 override 渲染，前提是该
+   文件列在 `templated_files` 里）。
+2. 在 `backends.json` 里加 backend 条目（schema 见英文 README）。
+3. **重启 `agent-stack-router`** 让它重读 `backends.json`：router 不会
+   热加载 `backends.json`，`image` / `extra_networks` / `extra_env` /
+   `templated_files` 都是启动时读一次。改完跑
+   `docker compose restart agent-stack-router`，新 backend 才会出现在
+   `/api/backends` 和 SPA 模型选择器里。
+
+### Sidecar 示例：backend 调同机的 LLM proxy 容器
+
+如果 `LLM_BASE_URL` 指向同 docker host 的另一个容器（比如
+`openai-compat-proxy`，挂在自己的 bridge 网络上），spawn 出来的
+per-user runner 必须加入那张网络。`network_mode: host` 只用在
+router/frontend，**不影响 backend runner**。
+
+```jsonc
+// backends.json
+{
+  "name": "openclaw",
+  "image": "ghcr.io/openclaw/openclaw:latest",
+  "extra_networks": ["my-llm-proxy_default"],
+  "extra_env": {
+    "LLM_BASE_URL": "http://openai-compat-proxy:8080/v1"
+  }
+}
+```
+
+router 会把 runner 接进 `my-llm-proxy_default`，runner 内
+`getent hosts openai-compat-proxy` 才能解析。**不配 `extra_networks`
+时所有 runner 都落在默认 `bridge` 网络，sidecar 名字解析不到，只有公网
+endpoint 能用。**
+
 ## 文档
 
 - [docs/hermes-integration.md](docs/hermes-integration.md) —— Hermes
@@ -308,6 +344,22 @@ curl -s -X POST   -b $JAR $BASE/api/runners/openclaw/start
 | spawn 成功，但 `/v1/chat/completions` 返回 404/400 | `${LLM_MODEL}` 不是上游真支持的 id | `curl -H 'Authorization: Bearer $LLM_API_KEY' $LLM_BASE_URL/models` 后到 *Settings → Backend API keys* 改值 |
 | 多 checkout 互相覆盖容器 | 两个 checkout 的 compose project name 撞了 | 在第二个 checkout 的 `.env` 里加 `COMPOSE_PROJECT_NAME=agent-stack-<别名>` |
 | router 启动报 `JWT_SECRET looks like the placeholder` | `.env` 还是 `CHANGE_ME_TO_RANDOM_HEX` | `sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|" .env` |
+| 第一次 `POST /api/runners/<backend>/start` 90s 后报 `runner not ready` | `docker compose up` 不会自动 pull backend 镜像（不是 compose service），首次 1-2 GB 镜像拉取超过 `BACKEND_STARTUP_TIMEOUT` | `docker pull` 把 `backends.json` 里所有 image 先拉一遍；或者 `.env` 里设 `BACKEND_PREPULL_AT_STARTUP=true` 让 router 启动时预拉 |
+| Backend runner 跑起来了但访问不到 `LLM_BASE_URL` | runner 默认在 `bridge` 网络，同机 sidecar 容器只在用户自定义网络里能按容器名解析 | 把 sidecar 的 docker network 名加到 `backends.json` 的 `extra_networks`（见上面 sidecar 示例），重启 router |
+| backend 容器已经退出，SPA 还显示 running | 状态由 idle reaper 刷新（`REAPER_INTERVAL_SECONDS`，默认 30s） | 等 ≤30s，或 `curl -X DELETE /api/runners/<backend>` 强制清掉 |
+
+## 备份 vs 重置
+
+`router.db` 是 sqlite + WAL，运行时盘上还有 `router.db-wal` /
+`router.db-shm` 两个文件存放未 checkpoint 的事务。**不要**只拷
+`router.db`：要么 `docker compose stop agent-stack-router` 之后再拷，
+要么用：
+
+```bash
+sqlite3 "$HOST_STACK_ROOT/router.db" ".backup /tmp/router-$(date +%F).db"
+```
+
+完全清掉用下面的"卸载 / 重置"。
 
 ## 卸载 / 重置
 

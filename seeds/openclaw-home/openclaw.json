@@ -75,8 +75,8 @@
     "customBindHost": "0.0.0.0",
     "port": 17567,
     "controlUi": {
-      "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true,
+      "allowInsecureAuth": false,
+      "dangerouslyDisableDeviceAuth": false,
       "allowedOrigins": [
         "*"
       ]

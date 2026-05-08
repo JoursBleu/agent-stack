@@ -130,6 +130,7 @@ BACKEND_PORT_START = env_int("BACKEND_PORT_START", 19000)
 BACKEND_PORT_END = env_int("BACKEND_PORT_END", 19999)
 BACKEND_STARTUP_TIMEOUT = env_int("BACKEND_STARTUP_TIMEOUT", 90)
 BACKEND_STARTUP_POLL = float(os.getenv("BACKEND_STARTUP_POLL", "0.5"))
+BACKEND_PREPULL_AT_STARTUP = os.getenv("BACKEND_PREPULL_AT_STARTUP", "false").lower() in ("1","true","yes","on")
 
 BACKENDS_CONFIG_PATH = Path(
     os.getenv("BACKENDS_CONFIG_PATH", str(STACK_ROOT / "backends.json"))
@@ -926,7 +927,24 @@ class RunnerManager:
                     detail={"last_err": last_err} if last_err else None,
                 ))
                 time.sleep(BACKEND_STARTUP_POLL)
-        raise HTTPException(status_code=504, detail=f"runner not ready: {last_err}")
+        # Capture the last few lines of the spawn container's stderr/stdout
+        # so the user (and the SPA) gets a real diagnostic instead of just
+        # "Connection refused".
+        log_tail = ""
+        try:
+            c = self.docker.containers.get(runner["container_name"])
+            raw = c.logs(tail=20, stdout=True, stderr=True)
+            if isinstance(raw, (bytes, bytearray)):
+                log_tail = raw.decode("utf-8", "replace").strip()
+            else:
+                log_tail = str(raw).strip()
+            status = c.status
+        except Exception:
+            status = "unknown"
+        detail = f"runner not ready: {last_err} (container status={status})"
+        if log_tail:
+            detail += f"\n--- last 20 log lines ---\n{log_tail}"
+        raise HTTPException(status_code=504, detail=detail)
 
     def _auth_headers(self, api_key: str, backend_def: Backend) -> dict[str, str]:
         if not api_key:
@@ -967,6 +985,27 @@ class RunnerManager:
         reaped: list[str] = []
         now = int(time.time())
         for runner in self.list_all_runners():
+            # First: if the container has exited (crash, OOM, schema mismatch),
+            # clear the row immediately regardless of idle time so the SPA's
+            # "running" badge stops lying within one reaper tick.
+            try:
+                c = self.docker.containers.get(runner["container_name"])
+                container_status = c.status  # "running" / "exited" / "created" / ...
+            except NotFound:
+                container_status = "missing"
+            except Exception:
+                container_status = None
+            if container_status in ("exited", "dead", "missing"):
+                log.info(
+                    "reaping dead runner user=%s backend=%s status=%s",
+                    runner["user_id"], runner["backend"], container_status,
+                )
+                try:
+                    self.stop(runner["user_id"], runner["backend"])
+                    reaped.append(runner["container_name"])
+                except Exception:
+                    log.exception("dead-runner cleanup failed for %s", runner["container_name"])
+                continue
             idle_limit = self.get_idle_seconds(runner["user_id"], runner["backend"])
             if now - int(runner["last_active"]) > idle_limit:
                 log.info(
@@ -989,10 +1028,48 @@ MANAGER = RunnerManager()
 # ---------------------------------------------------------------------------
 
 
+def _prepull_backend_images() -> None:
+    """Pull every backends.json image once at router startup so the first
+    POST /api/runners/<backend>/start never blocks on a 1-2 GB image pull
+    inside the BACKEND_STARTUP_TIMEOUT window.
+
+    Best-effort: log + swallow any failure (offline host, private registry
+    without creds, etc.). The on-demand pull path in spawn() still kicks
+    in as a fallback."""
+    if not BACKEND_PREPULL_AT_STARTUP:
+        return
+    try:
+        client = docker.from_env()
+    except Exception as exc:
+        log.warning("prepull: docker client unavailable, skipping: %s", exc)
+        return
+    seen: set[str] = set()
+    for backend in BACKENDS.values():
+        if backend.disabled:
+            continue
+        img = backend.image
+        if not img or img in seen:
+            continue
+        seen.add(img)
+        try:
+            client.images.get(img)
+            log.info("prepull: %s already present", img)
+            continue
+        except Exception:
+            pass
+        log.info("prepull: pulling %s ...", img)
+        try:
+            client.images.pull(img)
+            log.info("prepull: %s ok", img)
+        except Exception as exc:
+            log.warning("prepull: %s failed: %s (will retry on demand)", img, exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db_init()
     bootstrap_admin()
+    await asyncio.to_thread(_prepull_backend_images)
     stop_event = asyncio.Event()
 
     async def reaper_loop():
@@ -1487,9 +1564,12 @@ async def v1_proxy(path: str, request: Request, user: dict[str, Any] = Depends(c
     # Hermes Agent derives a session id from sha256(system + first user msg)
     # by default, which collides whenever two conversations start with the
     # same prompt (e.g. both "hi"). It honors `X-Hermes-Session-Id` if set,
-    # so pin the session to our conversation id.
-    if backend_def.name == "hermes-agent" and user_field:
-        headers["X-Hermes-Session-Id"] = user_field
+    # so pin the session to our conversation id (sent by the SPA in the
+    # OpenAI `user` field). When the client is a raw OpenAI SDK that does
+    # not pass `user`, fall back to a per-(agent-stack-)user session id so
+    # at least different users never share a Hermes context.
+    if backend_def.name == "hermes-agent":
+        headers["X-Hermes-Session-Id"] = user_field or f"agstack-u{user['id']}"
 
     try:
         upstream_request = UPSTREAM_CLIENT.build_request(
