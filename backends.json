@@ -2,12 +2,14 @@
   {
     "name": "openclaw",
     "display_name": "OpenClaw",
-    "image": "openclaw-with-chromium:latest",
+    "image": "ghcr.io/openclaw/openclaw:latest",
     "container_prefix": "agstack-openclaw",
     "internal_port": 17567,
     "health_path": "/healthz",
     "ready_path": "/v1/models",
-    "extra_models": ["openclaw/main"],
+    "extra_models": [
+      "openclaw/main"
+    ],
     "api_key_env": "OPENCLAW_GATEWAY_TOKEN",
     "api_key_header": "Authorization",
     "api_key_scheme": "Bearer",
@@ -17,9 +19,20 @@
       "OPENCLAW_GATEWAY_BIND": "0.0.0.0",
       "NODE_ENV": "production"
     },
-    "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"],
-    "templated_files": ["openclaw.json"],
-    "cmd": ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"],
+    "user_overridable_env": [
+      "LLM_BASE_URL",
+      "LLM_API_KEY",
+      "LLM_MODEL"
+    ],
+    "templated_files": [
+      "openclaw.json"
+    ],
+    "cmd": [
+      "node",
+      "openclaw.mjs",
+      "gateway",
+      "--allow-unconfigured"
+    ],
     "user": "node",
     "chown_uid": 1000,
     "chown_gid": 1000,
@@ -33,7 +46,9 @@
     "internal_port": 8080,
     "health_path": "/health",
     "ready_path": "/v1/models",
-    "extra_models": ["hermes-agent/main"],
+    "extra_models": [
+      "hermes-agent/main"
+    ],
     "api_key_env": "API_SERVER_KEY",
     "api_key_header": "Authorization",
     "api_key_scheme": "Bearer",
@@ -47,9 +62,19 @@
       "API_SERVER_MODEL_NAME": "hermes-agent",
       "GATEWAY_ALLOW_ALL_USERS": "true"
     },
-    "user_overridable_env": ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"],
-    "templated_files": ["config.yaml", ".env"],
-    "cmd": ["gateway", "run"],
+    "user_overridable_env": [
+      "LLM_BASE_URL",
+      "LLM_API_KEY",
+      "LLM_MODEL"
+    ],
+    "templated_files": [
+      "config.yaml",
+      ".env"
+    ],
+    "cmd": [
+      "gateway",
+      "run"
+    ],
     "user": "root",
     "chown_uid": 0,
     "chown_gid": 0,

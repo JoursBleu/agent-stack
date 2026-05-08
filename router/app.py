@@ -846,7 +846,21 @@ class RunnerManager:
                             stage="image_pull", progress=15,
                             message=f"pulling image {backend_def.image}",
                         ))
-                        self.docker.images.pull(backend_def.image)
+                        try:
+                            self.docker.images.pull(backend_def.image)
+                        except (APIError, NotFound) as pull_exc:
+                            # Pull failed (registry 404, auth, network, ...).
+                            # Translate into a typed 502 with the docker
+                            # daemon's own explanation so the SPA / curl
+                            # caller doesn't just see HTTP 500.
+                            explanation = getattr(pull_exc, "explanation", None) or str(pull_exc)
+                            raise HTTPException(
+                                status_code=502,
+                                detail=(
+                                    f"failed to pull image {backend_def.image!r} "
+                                    f"for backend {backend_def.name}: {explanation}"
+                                ),
+                            )
                         self.docker.containers.run(**run_kwargs)
                     except APIError as exc:
                         if "is already in use" in str(exc):
@@ -878,6 +892,25 @@ class RunnerManager:
                             """,
                             (user["id"], backend_def.name, container_name, port, api_key, now, now),
                         )
+                except HTTPException:
+                    # Already a typed error with rich detail; let it propagate.
+                    self._emit_progress(user["id"], backend_def.name, RunnerEvent(
+                        stage="error", progress=100, message="container failed to start",
+                    ))
+                    raise
+                except APIError as exc:
+                    log.exception("docker APIError starting runner %s/%s", user["id"], backend_def.name)
+                    self._emit_progress(user["id"], backend_def.name, RunnerEvent(
+                        stage="error", progress=100, message="container failed to start",
+                    ))
+                    explanation = getattr(exc, "explanation", None) or str(exc)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"docker daemon refused to start backend {backend_def.name}: "
+                            f"{explanation}"
+                        ),
+                    )
                 except Exception:
                     log.exception("failed to start runner %s/%s", user["id"], backend_def.name)
                     self._emit_progress(user["id"], backend_def.name, RunnerEvent(
@@ -1028,6 +1061,13 @@ MANAGER = RunnerManager()
 # ---------------------------------------------------------------------------
 
 
+# In-memory map populated by _prepull_backend_images(); surfaced via /healthz
+# so operators can tell at a glance which images failed to prepull (would
+# otherwise only show up in `docker logs` after the first /start request
+# blows past BACKEND_STARTUP_TIMEOUT).
+PREPULL_STATUS: dict[str, str] = {}
+
+
 def _prepull_backend_images() -> None:
     """Pull every backends.json image once at router startup so the first
     POST /api/runners/<backend>/start never blocks on a 1-2 GB image pull
@@ -1035,13 +1075,16 @@ def _prepull_backend_images() -> None:
 
     Best-effort: log + swallow any failure (offline host, private registry
     without creds, etc.). The on-demand pull path in spawn() still kicks
-    in as a fallback."""
+    in as a fallback. Per-image outcome is recorded in PREPULL_STATUS and
+    exposed by /healthz."""
     if not BACKEND_PREPULL_AT_STARTUP:
+        PREPULL_STATUS["_disabled"] = "BACKEND_PREPULL_AT_STARTUP=false"
         return
     try:
         client = docker.from_env()
     except Exception as exc:
         log.warning("prepull: docker client unavailable, skipping: %s", exc)
+        PREPULL_STATUS["_docker"] = f"unavailable: {exc}"
         return
     seen: set[str] = set()
     for backend in BACKENDS.values():
@@ -1054,6 +1097,7 @@ def _prepull_backend_images() -> None:
         try:
             client.images.get(img)
             log.info("prepull: %s already present", img)
+            PREPULL_STATUS[img] = "present"
             continue
         except Exception:
             pass
@@ -1061,8 +1105,11 @@ def _prepull_backend_images() -> None:
         try:
             client.images.pull(img)
             log.info("prepull: %s ok", img)
+            PREPULL_STATUS[img] = "ok"
         except Exception as exc:
+            msg = str(exc).strip().splitlines()[-1][:300] if str(exc) else exc.__class__.__name__
             log.warning("prepull: %s failed: %s (will retry on demand)", img, exc)
+            PREPULL_STATUS[img] = f"failed: {msg}"
 
 
 @asynccontextmanager
@@ -1947,7 +1994,15 @@ def append_message(
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "backends": list(BACKENDS)}
+    return {
+        "ok": True,
+        "backends": list(BACKENDS),
+        # Per-image prepull outcome from startup. Empty dict (or only the
+        # "_disabled" sentinel) when BACKEND_PREPULL_AT_STARTUP=false.
+        # Useful for ops to spot "image not in registry" / network errors
+        # without grepping docker logs.
+        "prepull_status": dict(PREPULL_STATUS),
+    }
 
 
 def main() -> None:

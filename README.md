@@ -249,18 +249,14 @@ Full details: [docs/per-user-env-overrides.md](docs/per-user-env-overrides.md).
 
 ## OpenClaw image
 
-`backends.json[openclaw].image` defaults to `openclaw-with-chromium:latest`.
-You have two ways to provide it.
+`backends.json[openclaw].image` defaults to `ghcr.io/openclaw/openclaw:latest`
+(the upstream image as-is, what the Quick start `docker pull` line uses).
+You have two options.
 
-### Option A — use the upstream OpenClaw image as-is
+### Option A (default) — use the upstream OpenClaw image as-is
 
-If you don't need a desktop browser inside the container, just point the
-backend at the upstream tag:
-
-```jsonc
-// backends.json
-{ "image": "ghcr.io/openclaw/openclaw:latest" }
-```
+The default `image:` value already matches; just make sure you ran
+`docker pull` (Quick start step 4):
 
 ```bash
 docker pull ghcr.io/openclaw/openclaw:latest
@@ -273,11 +269,13 @@ build matrix.
 
 ### Option B — build the thin overlay shipped in this repo
 
-If you need OpenClaw's `browser` plugin to drive a real desktop Chromium:
+If you need OpenClaw's `browser` plugin to drive a real desktop Chromium,
+build the overlay and point `backends.json` at it:
 
 ```bash
 cd images/openclaw
 docker build -t openclaw-with-chromium:latest .
+# then in backends.json: "image": "openclaw-with-chromium:latest"
 ```
 
 The overlay only adds `chromium`, CJK + emoji fonts, the libs Chromium
@@ -316,7 +314,7 @@ the overlay (drop the proxy wrapper / sudo / fonts you don't need).
 {
   "name": "openclaw",                       // canonical model id
   "display_name": "OpenClaw",
-  "image": "openclaw-with-chromium:latest",
+  "image": "ghcr.io/openclaw/openclaw:latest",
   "container_prefix": "agstack-openclaw",
   "internal_port": 17567,                   // port inside container
   "health_path": "/healthz",
@@ -527,6 +525,7 @@ Or wait for the idle reaper (`DEFAULT_IDLE_SECONDS`, default 600s).
 | First `POST /api/runners/<backend>/start` times out at ~90 s with `runner not ready` | `docker compose up` does **not** auto-pull backend images (they aren't compose services), and a 1-2 GB image pull blows past `BACKEND_STARTUP_TIMEOUT`. | Run `docker pull` for every `image` in `backends.json` once, or set `BACKEND_PREPULL_AT_STARTUP=true` in `.env` to make the router pre-pull on boot. |
 | Backend runner cannot reach `LLM_BASE_URL` even though `curl` from the host works | The runner container is on the default `bridge` network; same-host sidecars are only reachable by container DNS name when both are on the same user-defined network. | Add the sidecar's network to `extra_networks` in `backends.json` (see "Sidecar example" above) and restart the router. |
 | Backend runner stays "running" in the SPA after it crashed | Status is refreshed by the idle reaper (`REAPER_INTERVAL_SECONDS`, default 30 s). | Wait ≤30 s, or curl `DELETE /api/runners/<backend>` to force-clean. |
+| `BACKEND_PREPULL_AT_STARTUP=true` but first spawn still times out | One of the images failed to pre-pull (typo in `backends.json`, registry 404, no internet, no creds). | `curl -fsS http://127.0.0.1:18080/healthz \| jq .prepull_status` shows per-image outcome (`ok` / `present` / `failed: ...`). |
 
 ## Backup vs reset
 

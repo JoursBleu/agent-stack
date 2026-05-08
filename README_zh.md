@@ -204,7 +204,8 @@ backend，并显示当前生效来源。
 
 ## OpenClaw 镜像
 
-`backends.json[openclaw].image` 默认是 `openclaw-with-chromium:latest`。
+`backends.json[openclaw].image` 默认是 `ghcr.io/openclaw/openclaw:latest`
+（与 Quick start 第 4 步 `docker pull` 一致）。
 你有两种方式来准备它。
 
 ### 方式 A —— 直接用上游 OpenClaw 镜像
@@ -213,7 +214,7 @@ backend，并显示当前生效来源。
 
 ```jsonc
 // backends.json
-{ "image": "openclaw/openclaw:latest" }
+{ "image": "ghcr.io/openclaw/openclaw:latest" }
 ```
 
 ```bash
@@ -347,6 +348,7 @@ curl -s -X POST   -b $JAR $BASE/api/runners/openclaw/start
 | 第一次 `POST /api/runners/<backend>/start` 90s 后报 `runner not ready` | `docker compose up` 不会自动 pull backend 镜像（不是 compose service），首次 1-2 GB 镜像拉取超过 `BACKEND_STARTUP_TIMEOUT` | `docker pull` 把 `backends.json` 里所有 image 先拉一遍；或者 `.env` 里设 `BACKEND_PREPULL_AT_STARTUP=true` 让 router 启动时预拉 |
 | Backend runner 跑起来了但访问不到 `LLM_BASE_URL` | runner 默认在 `bridge` 网络，同机 sidecar 容器只在用户自定义网络里能按容器名解析 | 把 sidecar 的 docker network 名加到 `backends.json` 的 `extra_networks`（见上面 sidecar 示例），重启 router |
 | backend 容器已经退出，SPA 还显示 running | 状态由 idle reaper 刷新（`REAPER_INTERVAL_SECONDS`，默认 30s） | 等 ≤30s，或 `curl -X DELETE /api/runners/<backend>` 强制清掉 |
+| `BACKEND_PREPULL_AT_STARTUP=true` 但首次 spawn 还是超时 | 有 image 预拉失败（typo / registry 404 / 无网络 / 无 creds），日志只是 WARNING | `curl -fsS http://127.0.0.1:18080/healthz \| jq .prepull_status` 看每个镜像的 `ok` / `present` / `failed: ...` |
 
 ## 备份 vs 重置
 
