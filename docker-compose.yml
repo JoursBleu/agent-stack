@@ -38,7 +38,15 @@ services:
       # Admin sets them in the web UI (Settings -> Backend API keys -> Global)
       # and toggles "share with users" so other users can inherit them.
     volumes:
+      # Per-deployment mutable state (users/, router.db). On a fresh install
+      # this directory just has to exist; the router populates it.
       - ${HOST_STACK_ROOT}:${STACK_DATA_ROOT:-/data}
+      # Ship backends.json + seed templates straight from the git checkout,
+      # read-only and overlaid on top of the data dir. This way `git pull`
+      # is enough to pick up new backends or updated seed templates -- no
+      # manual `cp` step on upgrade.
+      - ./backends.json:${STACK_DATA_ROOT:-/data}/backends.json:ro
+      - ./seeds:${STACK_DATA_ROOT:-/data}/seeds:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
   agent-stack-frontend:

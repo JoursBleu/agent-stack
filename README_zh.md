@@ -81,10 +81,10 @@ cp .env.example .env
 # router 不再从 .env 读 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL；它们由 bootstrap admin
 # 首次登录后在网页 Settings → Backend API keys 里保存（见下方"配置上游 key"）
 
+# stage 数据目录（只需要 mkdir；backends.json 和 seeds/ 由 docker compose
+# 从本仓库直接 bind-mount 进 router 容器）
 DATA=$(grep ^HOST_STACK_ROOT .env | cut -d= -f2)
 mkdir -p "$DATA"
-cp backends.json "$DATA"/
-cp -r seeds "$DATA"/
 
 # 准备 OpenClaw 镜像（见下面"OpenClaw 镜像"）
 docker pull openclaw/openclaw:latest
@@ -139,6 +139,21 @@ curl -s -X PUT -b /tmp/admin.jar -H 'Content-Type: application/json' \
 
 之后新建对话 → 选 backend → 第一条消息触发冷启（前端有进度条）→
 后续消息复用热运行的 runner。
+
+### 升级
+
+```bash
+cd agent-stack
+git pull
+docker compose up -d --build
+```
+
+`backends.json` 和 `seeds/` 是从 git checkout 直接 bind-mount 进容器
+的，所以 `git pull` 之后立刻生效，不需要再手动 cp。已经在跑的 per-user
+容器会继续用之前渲染好的 seed；新拉起的容器（停掉旧的或被 reaper
+回收以后）会用新 seed。`$HOST_STACK_ROOT/users/` 下的用户状态和
+`$HOST_STACK_ROOT/router.db` 在 rebuild 时不会丢。
+
 
 ## 上游 LLM key —— admin 共享默认 + 用户级 / backend 级覆盖
 

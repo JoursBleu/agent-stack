@@ -101,11 +101,10 @@ cp .env.example .env
 #  the bootstrap admin saves them in the web UI after first login; see step
 #  "Seed the upstream LLM key" below)
 
-# stage data dir
+# stage data dir (only mkdir is required; backends.json and seeds/
+# are bind-mounted into the router straight from this checkout)
 DATA=$(grep ^HOST_STACK_ROOT .env | cut -d= -f2)
 mkdir -p "$DATA"
-cp backends.json "$DATA"/
-cp -r seeds "$DATA"/
 
 # Provide an OpenClaw image — see "OpenClaw image" below for two options
 docker pull openclaw/openclaw:latest
@@ -166,6 +165,23 @@ curl -s -X PUT -b $JAR -H 'Content-Type: application/json' \
 
 Then start a new chat → pick a backend → first message triggers cold
 start with progress bar; subsequent messages reuse the warm runner.
+
+### Upgrading
+
+```bash
+cd agent-stack
+git pull
+docker compose up -d --build
+```
+
+`backends.json` and `seeds/` are bind-mounted from the checkout, so a
+`git pull` is enough to pick up new backend definitions or updated
+seed templates. Already-spawned per-user containers keep running with
+their previously rendered seed; new spawns (after stopping the old
+container or letting the reaper recycle it) use the updated one.
+Per-user state under `$HOST_STACK_ROOT/users/` and the router DB
+(`$HOST_STACK_ROOT/router.db`) survive the rebuild.
+
 
 ## Upstream LLM key — admin-shared default + per-user / per-backend override
 
