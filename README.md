@@ -127,12 +127,17 @@ docker compose logs -f agent-stack-router
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-> **Multiple checkouts on the same host?** docker compose isolates per
-> project (= directory name) automatically; we deliberately do NOT pin
-> `container_name:` in `docker-compose.yml`. But each checkout's
-> `HOST_STACK_ROOT` must be a distinct absolute path, and the
-> `ROUTER_PORT` / `FRONTEND_PORT` / `BACKEND_PORT_START..END` ranges in
-> `.env` must not overlap.
+> **Multiple checkouts on the same host?** `docker-compose.yml` pins
+> `name: ${COMPOSE_PROJECT_NAME:-agent-stack}`, so by default every
+> checkout — *regardless of directory name* — is the same compose
+> project, and `compose up` in checkout B will silently recreate
+> checkout A's containers under B's config. To run a second instance
+> side by side you **must** set a distinct project name in checkout
+> B's `.env`, e.g. `COMPOSE_PROJECT_NAME=agent-stack-staging`, AND
+> give it a distinct `HOST_STACK_ROOT` absolute path AND non-overlapping
+> `ROUTER_PORT` / `FRONTEND_PORT` / `BACKEND_PORT_START..END`.
+> Relying on the directory name alone is not enough — two clones
+> both named `agent-stack/` will collide.
 
 Open `http://<host>:18000/`, log in with the bootstrap admin (signup is
 allowed when `ALLOW_SIGNUP=true`, but signup always creates a regular

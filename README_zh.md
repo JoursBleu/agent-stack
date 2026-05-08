@@ -102,11 +102,15 @@ docker compose logs -f router
 curl -fsS http://127.0.0.1:18080/healthz
 ```
 
-> **同机多 checkout？** docker compose 按目录名做 project 自动隔离容器，
-> 我们故意**没有**在 `docker-compose.yml` 里硬编码 `container_name:`。
-> 但每个 checkout 的 `HOST_STACK_ROOT` 必须是不同的绝对路径，并在
-> `.env` 里给 `ROUTER_PORT` / `FRONTEND_PORT` /
-> `BACKEND_PORT_START..END` 分配不冲突的端口段。
+> **同机多 checkout？** `docker-compose.yml` 顶层固定了
+> `name: ${COMPOSE_PROJECT_NAME:-agent-stack}`，因此**默认情况下不管
+> checkout 在哪个目录，都属于同一个 compose project**，在 checkout B
+> 跑 `compose up` 会静默地把 checkout A 的容器按 B 的配置重建。要
+> 同机并排跑第二份实例，**必须**在 checkout B 的 `.env` 里设一个不
+> 同的 project name，例如 `COMPOSE_PROJECT_NAME=agent-stack-staging`；
+> 同时 `HOST_STACK_ROOT` 必须是不同的绝对路径，`ROUTER_PORT` /
+> `FRONTEND_PORT` / `BACKEND_PORT_START..END` 不能重叠。仅靠目录改名
+> 是不够的 —— 两个都叫 `agent-stack/` 的克隆会冲突。
 
 打开 `http://<host>:18000/`，用 bootstrap admin 登录。signup 在
 `ALLOW_SIGNUP=true` 时也能用，但**注册出来的永远只能是普通 user**——系
@@ -302,7 +306,7 @@ curl -s -X POST   -b $JAR $BASE/api/runners/openclaw/start
 | `pull access denied for openclaw/openclaw` | 走错 registry，应在 GHCR | `docker pull ghcr.io/openclaw/openclaw:latest` |
 | spawn 几秒后报 `runner not ready: Connection refused` | 后端容器启动失败（seed 字段不匹配镜像版本 / 镜像没拉 / OOM 等） | `docker logs agstack-<backend>-<user-slug>` |
 | spawn 成功，但 `/v1/chat/completions` 返回 404/400 | `${LLM_MODEL}` 不是上游真支持的 id | `curl -H 'Authorization: Bearer $LLM_API_KEY' $LLM_BASE_URL/models` 后到 *Settings → Backend API keys* 改值 |
-| 多 checkout 互相覆盖容器 | 旧版 `docker-compose.yml` 硬编码了 `container_name:`，已删除 | `git diff docker-compose.yml` |
+| 多 checkout 互相覆盖容器 | 两个 checkout 的 compose project name 撞了 | 在第二个 checkout 的 `.env` 里加 `COMPOSE_PROJECT_NAME=agent-stack-<别名>` |
 | router 启动报 `JWT_SECRET looks like the placeholder` | `.env` 还是 `CHANGE_ME_TO_RANDOM_HEX` | `sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|" .env` |
 
 ## 卸载 / 重置
