@@ -5,6 +5,12 @@
 
 > [English README](./README.md)
 
+## 截图
+
+![OpenClaw 在 agent-stack 里跑起来——左边栏两个 backend，每个 backend 一个独立 runner 容器](docs/screenshots/chat.png)
+
+![登录页](docs/screenshots/login.png)
+
 替代 "OpenWebUI + 一堆 sidecar 容器" 的轻量方案：一个 router、一份小型
 SPA、按需 docker spawn 出来的 per-user agent 容器、闲置自动回收，对话历史
 存在云端。

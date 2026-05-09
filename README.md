@@ -10,6 +10,12 @@ when idle, conversation history stored cloud-side.
 
 [中文版 README](./README_zh.md)
 
+## Screenshots
+
+![OpenClaw running inside agent-stack — left rail shows two backends, each with its own per-user runner container](docs/screenshots/chat.png)
+
+![Login page](docs/screenshots/login.png)
+
 ## Highlights
 
 - **Per `(user, backend)` Docker container** — one runner per user per
