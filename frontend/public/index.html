@@ -66,6 +66,7 @@
       </div>
       <div class="ch-actions">
         <button id="admin-btn" class="hidden" data-i18n-title="sidebar.admin" title="Users">⚭</button>
+        <button id="rooms-btn" title="Rooms">⌬</button>
         <button id="settings-btn" data-i18n-title="sidebar.settings" title="Settings">⚙</button>
         <button id="logout-btn" data-i18n-title="sidebar.logout" title="Sign out">↩</button>
       </div>
@@ -124,6 +125,46 @@
         <p class="setting-hint" data-i18n="settings.api_keys_hint">Leave a field empty to use the shared default key. Saving a key restarts your runner so the new value takes effect on next chat.</p>
         <div id="setting-api-keys"></div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Rooms modal -->
+<div id="rooms-modal" class="modal hidden">
+  <div class="modal-card modal-card--lg rooms-card">
+    <div class="modal-header">
+      <h2>Rooms</h2>
+      <div class="rooms-header-actions">
+        <button id="rooms-new-btn" class="btn-primary">+ New room</button>
+        <button id="rooms-close">×</button>
+      </div>
+    </div>
+    <div class="rooms-body">
+      <aside class="rooms-list-pane">
+        <div id="rooms-list"></div>
+      </aside>
+      <section class="rooms-detail-pane">
+        <div id="rooms-detail-empty" class="rooms-empty">Select or create a room.</div>
+        <div id="rooms-detail" class="hidden">
+          <header class="rooms-detail-header">
+            <div>
+              <div id="rooms-detail-title" class="rooms-title"></div>
+              <div id="rooms-detail-meta" class="rooms-meta"></div>
+            </div>
+            <div class="rooms-detail-actions">
+              <button id="rooms-members-btn" class="btn-ghost">Members</button>
+              <button id="rooms-pause-btn" class="btn-ghost">Pause</button>
+              <button id="rooms-leave-btn" class="btn-ghost">Delete</button>
+            </div>
+          </header>
+          <div id="rooms-members-panel" class="rooms-members hidden"></div>
+          <div id="rooms-messages" class="rooms-messages"></div>
+          <form id="rooms-composer" class="rooms-composer">
+            <textarea id="rooms-composer-input" rows="2" placeholder="Send a message… use @bob/hermes to mention an agent"></textarea>
+            <button type="submit" class="btn-primary">Send</button>
+          </form>
+        </div>
+      </section>
     </div>
   </div>
 </div>

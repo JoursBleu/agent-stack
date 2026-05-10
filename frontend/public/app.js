@@ -1440,3 +1440,302 @@ applyI18n();
     showAuth("login");
   }
 })();
+
+
+/* =====================================================================
+ * Rooms (multi-user/agent chat)
+ * ===================================================================== */
+
+const Rooms = {
+  list: [],
+  current: null,        // {id,title,owner_user_id,paused,members:[],is_owner}
+  messages: [],
+  membersOpen: false,
+  sse: null,
+  lastSeenId: null,
+  pollTimer: null,
+};
+
+async function roomsRefreshList() {
+  const r = await api("GET", "/api/rooms");
+  Rooms.list = r.rooms || [];
+  roomsRenderList();
+}
+
+function roomsRenderList() {
+  const el = $("#rooms-list");
+  if (!Rooms.list.length) {
+    el.innerHTML = '<div class="rooms-empty" style="padding:16px;font-size:13px">No rooms yet.</div>';
+    return;
+  }
+  el.innerHTML = Rooms.list.map(r => {
+    const active = Rooms.current && Rooms.current.id === r.id ? " active" : "";
+    return `<div class="rooms-list-item${active}" data-id="${r.id}">
+      <div class="r-title">${escapeHtml(r.title)}</div>
+      <div class="r-meta">${r.member_count} member(s)${r.paused ? " · paused" : ""}</div>
+    </div>`;
+  }).join("");
+  el.querySelectorAll(".rooms-list-item").forEach(div => {
+    div.addEventListener("click", () => roomsOpen(div.dataset.id));
+  });
+}
+
+async function roomsOpen(id) {
+  roomsCloseSse();
+  Rooms.messages = [];
+  Rooms.lastSeenId = null;
+  Rooms.membersOpen = false;
+  const r = await api("GET", `/api/rooms/${id}`);
+  Rooms.current = { ...r.room, members: r.members, is_owner: r.is_owner };
+  $("#rooms-detail-empty").classList.add("hidden");
+  $("#rooms-detail").classList.remove("hidden");
+  $("#rooms-members-panel").classList.add("hidden");
+  roomsRenderHeader();
+  await roomsLoadMessages();
+  roomsRenderMessages();
+  roomsRenderList();
+  roomsOpenSse();
+}
+
+function roomsRenderHeader() {
+  const r = Rooms.current;
+  $("#rooms-detail-title").textContent = r.title;
+  const approved = r.members.filter(m => m.status === "approved");
+  const pending  = r.members.filter(m => m.status === "pending");
+  $("#rooms-detail-meta").textContent =
+    `${approved.length} member(s)` +
+    (pending.length ? ` · ${pending.length} pending` : "") +
+    (r.paused ? " · paused" : "") +
+    (r.is_owner ? " · you own" : "");
+  $("#rooms-pause-btn").textContent = r.paused ? "Resume" : "Pause";
+  $("#rooms-pause-btn").classList.toggle("hidden", !r.is_owner);
+  $("#rooms-leave-btn").classList.toggle("hidden", !r.is_owner);
+  roomsRenderMembers();
+}
+
+function roomsRenderMembers() {
+  const panel = $("#rooms-members-panel");
+  const r = Rooms.current;
+  const isOwner = r.is_owner;
+  panel.innerHTML = `
+    <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+      <strong>Members</strong>
+      <div style="display:flex;gap:6px;">
+        <button class="btn-ghost" id="rooms-add-self-btn" style="font-size:11px;padding:3px 8px;">Add my agent…</button>
+      </div>
+    </div>
+    ${r.members.map(m => {
+      const slug = m.user_slug || m.user_id.slice(0, 6);
+      const label = m.kind === "runner"
+        ? `${escapeHtml(slug)}/<span class="badge runner">${escapeHtml(m.backend_name)}</span> · mode=${m.mode}`
+        : escapeHtml(slug);
+      const statusBadge = m.status === "pending"  ? '<span class="badge pending">pending</span>'
+                       : m.status === "rejected" ? '<span class="badge rejected">rejected</span>'
+                       : '';
+      let actions = "";
+      if (isOwner && m.status === "pending") {
+        actions = `<button class="btn-primary" data-act="approve" data-uid="${m.user_id}" data-kind="${m.kind}" data-bn="${escapeHtml(m.backend_name)}">Approve</button>
+                   <button class="btn-ghost"   data-act="reject"  data-uid="${m.user_id}" data-kind="${m.kind}" data-bn="${escapeHtml(m.backend_name)}">Reject</button>`;
+      } else if (isOwner && m.status === "approved" && !(m.kind === "user" && m.user_id === r.owner_user_id)) {
+        actions = `<button class="btn-ghost" data-act="remove" data-uid="${m.user_id}" data-kind="${m.kind}" data-bn="${escapeHtml(m.backend_name)}">Remove</button>`;
+      }
+      return `<div class="rooms-member-row">
+        <div class="member-info">${label} ${statusBadge}</div>
+        <div class="member-actions">${actions}</div>
+      </div>`;
+    }).join("")}
+  `;
+  panel.querySelector("#rooms-add-self-btn").addEventListener("click", roomsAddSelfDialog);
+  panel.querySelectorAll("button[data-act]").forEach(b => {
+    b.addEventListener("click", async () => {
+      const params = new URLSearchParams({
+        member_user_id: b.dataset.uid,
+        member_kind: b.dataset.kind,
+        backend_name: b.dataset.bn,
+      });
+      try {
+        if (b.dataset.act === "approve") await api("POST", `/api/rooms/${r.id}/members/approve?${params}`);
+        else if (b.dataset.act === "reject") await api("POST", `/api/rooms/${r.id}/members/reject?${params}`);
+        else if (b.dataset.act === "remove") await api("DELETE", `/api/rooms/${r.id}/members?${params}`);
+        await roomsReloadCurrent();
+      } catch (e) { alert(e.message); }
+    });
+  });
+}
+
+async function roomsAddSelfDialog() {
+  // Offer joining as user (if not yet) or as one of available backends as runner.
+  const r = Rooms.current;
+  const meRow = r.members.find(m => m.kind === "user" && m.user_id === State.user.id);
+  const choices = [];
+  if (!meRow) choices.push({ label: "Join as user (myself)", kind: "user", backend_name: "" });
+  // backends list
+  try {
+    const bs = await api("GET", "/api/backends");
+    for (const b of (bs.backends || bs)) {
+      const name = b.name || b;
+      const exists = r.members.find(m => m.kind === "runner" && m.backend_name === name && m.user_id === State.user.id);
+      if (!exists) {
+        choices.push({ label: `Add my ${name} runner (passive)`, kind: "runner", backend_name: name, mode: "passive" });
+        choices.push({ label: `Add my ${name} runner (ACTIVE — chimes in freely)`, kind: "runner", backend_name: name, mode: "active" });
+      }
+    }
+  } catch {}
+  if (!choices.length) { alert("Nothing to add — you and all your runners are already in this room."); return; }
+  const txt = choices.map((c, i) => `${i+1}. ${c.label}`).join("\n");
+  const sel = prompt(`Choose what to add (number):\n\n${txt}`, "1");
+  if (!sel) return;
+  const idx = parseInt(sel, 10) - 1;
+  const c = choices[idx];
+  if (!c) return;
+  try {
+    await api("POST", `/api/rooms/${r.id}/join`, { kind: c.kind, backend_name: c.backend_name, mode: c.mode || "passive" });
+    await roomsReloadCurrent();
+  } catch (e) { alert(e.message); }
+}
+
+async function roomsReloadCurrent() {
+  if (!Rooms.current) return;
+  const r = await api("GET", `/api/rooms/${Rooms.current.id}`);
+  Rooms.current = { ...r.room, members: r.members, is_owner: r.is_owner };
+  roomsRenderHeader();
+  await roomsRefreshList();
+}
+
+async function roomsLoadMessages() {
+  const r = await api("GET", `/api/rooms/${Rooms.current.id}/messages?limit=200`);
+  Rooms.messages = r.messages || [];
+  if (Rooms.messages.length) Rooms.lastSeenId = Rooms.messages[Rooms.messages.length - 1].id;
+}
+
+function roomsRenderMessages() {
+  const el = $("#rooms-messages");
+  el.innerHTML = Rooms.messages.map(m => {
+    const isSelf = m.sender_kind === "user" && m.sender_user_id === State.user.id;
+    const cls = isSelf ? "self" : (m.sender_kind === "runner" ? "runner" : "user");
+    const slug = m.sender_user_slug || m.sender_user_id.slice(0,6);
+    const from = m.sender_kind === "runner" ? `${escapeHtml(slug)}/${escapeHtml(m.sender_backend_name)}` : escapeHtml(slug);
+    return `<div class="rmsg ${cls}"><div class="rmsg-from">${from}</div><div class="rmsg-content">${escapeHtml(m.content)}</div></div>`;
+  }).join("");
+  el.scrollTop = el.scrollHeight;
+}
+
+function roomsAppendMessage(m) {
+  if (Rooms.messages.find(x => x.id === m.id)) return;
+  Rooms.messages.push(m);
+  Rooms.lastSeenId = m.id;
+  roomsRenderMessages();
+}
+
+function roomsOpenSse() {
+  roomsCloseSse();
+  if (!Rooms.current) return;
+  try {
+    const es = new EventSource(`/api/rooms/${Rooms.current.id}/stream`, { withCredentials: true });
+    es.onmessage = (ev) => {
+      let data; try { data = JSON.parse(ev.data); } catch { return; }
+      if (data.kind === "message") roomsAppendMessage(data.payload);
+      else if (data.kind === "member") roomsReloadCurrent().catch(() => {});
+    };
+    es.onerror = () => {
+      // fall back to polling
+      es.close();
+      Rooms.sse = null;
+      roomsStartPolling();
+    };
+    Rooms.sse = es;
+    if (Rooms.pollTimer) { clearInterval(Rooms.pollTimer); Rooms.pollTimer = null; }
+  } catch {
+    roomsStartPolling();
+  }
+}
+
+function roomsStartPolling() {
+  if (Rooms.pollTimer) return;
+  Rooms.pollTimer = setInterval(async () => {
+    if (!Rooms.current) return;
+    try {
+      const q = Rooms.lastSeenId ? `?after_id=${Rooms.lastSeenId}` : "";
+      const r = await api("GET", `/api/rooms/${Rooms.current.id}/messages${q}`);
+      for (const m of r.messages || []) roomsAppendMessage(m);
+    } catch {}
+  }, 3000);
+}
+
+function roomsCloseSse() {
+  if (Rooms.sse) { try { Rooms.sse.close(); } catch {} Rooms.sse = null; }
+  if (Rooms.pollTimer) { clearInterval(Rooms.pollTimer); Rooms.pollTimer = null; }
+}
+
+function openRoomsModal() {
+  $("#rooms-modal").classList.remove("hidden");
+  roomsRefreshList().catch(e => alert(e.message));
+}
+function closeRoomsModal() {
+  $("#rooms-modal").classList.add("hidden");
+  roomsCloseSse();
+}
+
+$("#rooms-btn").addEventListener("click", openRoomsModal);
+$("#rooms-close").addEventListener("click", closeRoomsModal);
+$("#rooms-modal").addEventListener("click", (ev) => {
+  if (ev.target.id === "rooms-modal") closeRoomsModal();
+});
+
+$("#rooms-new-btn").addEventListener("click", async () => {
+  const title = prompt("Room name?", "");
+  if (!title || !title.trim()) return;
+  try {
+    const r = await api("POST", "/api/rooms", { title: title.trim() });
+    await roomsRefreshList();
+    await roomsOpen(r.room.id);
+  } catch (e) { alert(e.message); }
+});
+
+$("#rooms-members-btn").addEventListener("click", () => {
+  Rooms.membersOpen = !Rooms.membersOpen;
+  $("#rooms-members-panel").classList.toggle("hidden", !Rooms.membersOpen);
+});
+
+$("#rooms-pause-btn").addEventListener("click", async () => {
+  if (!Rooms.current) return;
+  const next = !Rooms.current.paused;
+  try {
+    await api("POST", `/api/rooms/${Rooms.current.id}/pause?paused=${next}`);
+    await roomsReloadCurrent();
+  } catch (e) { alert(e.message); }
+});
+
+$("#rooms-leave-btn").addEventListener("click", async () => {
+  if (!Rooms.current || !Rooms.current.is_owner) return;
+  if (!confirm(`Delete room "${Rooms.current.title}"? This cannot be undone.`)) return;
+  try {
+    await api("DELETE", `/api/rooms/${Rooms.current.id}`);
+    Rooms.current = null;
+    $("#rooms-detail").classList.add("hidden");
+    $("#rooms-detail-empty").classList.remove("hidden");
+    roomsCloseSse();
+    await roomsRefreshList();
+  } catch (e) { alert(e.message); }
+});
+
+$("#rooms-composer").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  if (!Rooms.current) return;
+  const ta = $("#rooms-composer-input");
+  const content = ta.value.trim();
+  if (!content) return;
+  ta.disabled = true;
+  try {
+    await api("POST", `/api/rooms/${Rooms.current.id}/messages`, { content });
+    ta.value = "";
+  } catch (e) { alert(e.message); }
+  finally { ta.disabled = false; ta.focus(); }
+});
+
+$("#rooms-composer-input").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    $("#rooms-composer").requestSubmit();
+  }
+});
