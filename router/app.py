@@ -300,6 +300,45 @@ def db_init() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_messages_conv
                 ON messages(conversation_id, created_at);
+            CREATE TABLE IF NOT EXISTS rooms (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                paused INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS room_members (
+                room_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('user','runner')),
+                user_id TEXT NOT NULL,
+                backend_name TEXT NOT NULL DEFAULT '',
+                mode TEXT NOT NULL DEFAULT 'passive' CHECK(mode IN ('passive','active')),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+                invited_by_user_id TEXT,
+                approved_by_user_id TEXT,
+                created_at INTEGER NOT NULL,
+                approved_at INTEGER,
+                PRIMARY KEY (room_id, kind, user_id, backend_name),
+                FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_room_members_room
+                ON room_members(room_id, status);
+            CREATE TABLE IF NOT EXISTS room_messages (
+                id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                sender_kind TEXT NOT NULL CHECK(sender_kind IN ('user','runner')),
+                sender_user_id TEXT NOT NULL,
+                sender_backend_name TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL,
+                agent_turn_id TEXT,
+                in_reply_to_message_id TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_room_messages_room
+                ON room_messages(room_id, id);
             """
         )
         # --- Migrations -------------------------------------------------
@@ -2003,6 +2042,289 @@ def healthz():
         # without grepping docker logs.
         "prepull_status": dict(PREPULL_STATUS),
     }
+
+
+# ---------------------------------------------------------------------------
+# Rooms (phase 1: user-only chat; runner integration in phase 2)
+# ---------------------------------------------------------------------------
+
+
+class RoomCreateBody(BaseModel):
+    title: str
+
+
+class RoomJoinBody(BaseModel):
+    kind: str = "user"  # 'user' or 'runner'
+    backend_name: str = ""  # required when kind='runner'
+    mode: str = "passive"  # 'passive' or 'active' (only meaningful for runners)
+
+
+class RoomMessageBody(BaseModel):
+    content: str
+
+
+def _room_owner_check(conn: sqlite3.Connection, room_id: str, user: dict[str, Any]) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="room not found")
+    is_owner = row["owner_user_id"] == user["id"]
+    is_admin = user.get("role") == "admin"
+    if not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="owner or admin only")
+    return dict(row)
+
+
+def _room_visible(conn: sqlite3.Connection, room_id: str, user: dict[str, Any]) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="room not found")
+    if user.get("role") == "admin" or row["owner_user_id"] == user["id"]:
+        return dict(row)
+    member = conn.execute(
+        "SELECT 1 FROM room_members WHERE room_id = ? AND kind='user' AND user_id = ? AND status = 'approved'",
+        (room_id, user["id"]),
+    ).fetchone()
+    if not member:
+        raise HTTPException(status_code=403, detail="not a member")
+    return dict(row)
+
+
+@app.get("/api/rooms")
+def api_list_rooms(user: dict[str, Any] = Depends(current_user)):
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.*, (
+                SELECT COUNT(*) FROM room_members rm
+                WHERE rm.room_id = r.id AND rm.status = 'approved'
+            ) AS member_count
+            FROM rooms r
+            WHERE r.owner_user_id = ?
+               OR EXISTS (
+                    SELECT 1 FROM room_members rm
+                    WHERE rm.room_id = r.id AND rm.kind='user'
+                      AND rm.user_id = ? AND rm.status='approved'
+               )
+            ORDER BY r.created_at DESC
+            """,
+            (user["id"], user["id"]),
+        ).fetchall()
+        return {"rooms": [dict(r) for r in rows]}
+
+
+@app.post("/api/rooms")
+def api_create_room(body: RoomCreateBody, user: dict[str, Any] = Depends(current_user)):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title required")
+    room_id = uuid.uuid4().hex
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        conn.execute(
+            "INSERT INTO rooms (id, title, owner_user_id, created_at) VALUES (?, ?, ?, ?)",
+            (room_id, title, user["id"], now),
+        )
+        conn.execute(
+            """
+            INSERT INTO room_members
+                (room_id, kind, user_id, backend_name, mode, status,
+                 invited_by_user_id, approved_by_user_id, created_at, approved_at)
+            VALUES (?, 'user', ?, '', 'passive', 'approved', ?, ?, ?, ?)
+            """,
+            (room_id, user["id"], user["id"], user["id"], now, now),
+        )
+    return {"room": {"id": room_id, "title": title, "owner_user_id": user["id"], "created_at": now, "paused": 0}}
+
+
+@app.get("/api/rooms/{room_id}")
+def api_get_room(room_id: str, user: dict[str, Any] = Depends(current_user)):
+    with db_connect() as conn:
+        room = _room_visible(conn, room_id, user)
+        members = conn.execute(
+            "SELECT * FROM room_members WHERE room_id = ? ORDER BY created_at",
+            (room_id,),
+        ).fetchall()
+        return {
+            "room": room,
+            "members": [dict(m) for m in members],
+            "is_owner": room["owner_user_id"] == user["id"],
+        }
+
+
+@app.delete("/api/rooms/{room_id}")
+def api_delete_room(room_id: str, user: dict[str, Any] = Depends(current_user)):
+    with _DB_LOCK, db_connect() as conn:
+        _room_owner_check(conn, room_id, user)
+        conn.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
+    return {"ok": True}
+
+
+@app.post("/api/rooms/{room_id}/pause")
+def api_room_pause(room_id: str, paused: bool = True, user: dict[str, Any] = Depends(current_user)):
+    with _DB_LOCK, db_connect() as conn:
+        _room_owner_check(conn, room_id, user)
+        conn.execute("UPDATE rooms SET paused = ? WHERE id = ?", (1 if paused else 0, room_id))
+    return {"ok": True, "paused": paused}
+
+
+@app.post("/api/rooms/{room_id}/join")
+def api_room_join(room_id: str, body: RoomJoinBody, user: dict[str, Any] = Depends(current_user)):
+    if body.kind not in ("user", "runner"):
+        raise HTTPException(status_code=400, detail="kind must be user|runner")
+    if body.kind == "runner":
+        if not body.backend_name:
+            raise HTTPException(status_code=400, detail="backend_name required for runner")
+        if body.backend_name not in BACKENDS:
+            raise HTTPException(status_code=400, detail="unknown backend")
+        if body.mode not in ("passive", "active"):
+            raise HTTPException(status_code=400, detail="mode must be passive|active")
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        room = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
+        if not room:
+            raise HTTPException(status_code=404, detail="room not found")
+        # owner self-add is auto-approved
+        is_owner = room["owner_user_id"] == user["id"]
+        status = "approved" if is_owner else "pending"
+        approved_by = user["id"] if is_owner else None
+        approved_at = now if is_owner else None
+        try:
+            conn.execute(
+                """
+                INSERT INTO room_members
+                    (room_id, kind, user_id, backend_name, mode, status,
+                     invited_by_user_id, approved_by_user_id, created_at, approved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (room_id, body.kind, user["id"], body.backend_name,
+                 body.mode if body.kind == "runner" else "passive",
+                 status, user["id"], approved_by, now, approved_at),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="already requested or member")
+    return {"ok": True, "status": status}
+
+
+@app.post("/api/rooms/{room_id}/members/approve")
+def api_room_approve(
+    room_id: str,
+    member_user_id: str,
+    member_kind: str = "user",
+    backend_name: str = "",
+    user: dict[str, Any] = Depends(current_user),
+):
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        _room_owner_check(conn, room_id, user)
+        cur = conn.execute(
+            """
+            UPDATE room_members
+               SET status = 'approved', approved_by_user_id = ?, approved_at = ?
+             WHERE room_id = ? AND kind = ? AND user_id = ? AND backend_name = ?
+               AND status = 'pending'
+            """,
+            (user["id"], now, room_id, member_kind, member_user_id, backend_name),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="pending member not found")
+    return {"ok": True}
+
+
+@app.post("/api/rooms/{room_id}/members/reject")
+def api_room_reject(
+    room_id: str,
+    member_user_id: str,
+    member_kind: str = "user",
+    backend_name: str = "",
+    user: dict[str, Any] = Depends(current_user),
+):
+    with _DB_LOCK, db_connect() as conn:
+        _room_owner_check(conn, room_id, user)
+        cur = conn.execute(
+            """
+            UPDATE room_members SET status = 'rejected'
+             WHERE room_id = ? AND kind = ? AND user_id = ? AND backend_name = ?
+               AND status = 'pending'
+            """,
+            (room_id, member_kind, member_user_id, backend_name),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="pending member not found")
+    return {"ok": True}
+
+
+@app.delete("/api/rooms/{room_id}/members")
+def api_room_remove_member(
+    room_id: str,
+    member_user_id: str,
+    member_kind: str = "user",
+    backend_name: str = "",
+    user: dict[str, Any] = Depends(current_user),
+):
+    with _DB_LOCK, db_connect() as conn:
+        room = _room_owner_check(conn, room_id, user)
+        if member_kind == "user" and member_user_id == room["owner_user_id"]:
+            raise HTTPException(status_code=400, detail="cannot remove owner")
+        conn.execute(
+            "DELETE FROM room_members WHERE room_id = ? AND kind = ? AND user_id = ? AND backend_name = ?",
+            (room_id, member_kind, member_user_id, backend_name),
+        )
+    return {"ok": True}
+
+
+@app.get("/api/rooms/{room_id}/messages")
+def api_room_messages(
+    room_id: str,
+    after_id: str | None = None,
+    limit: int = 200,
+    user: dict[str, Any] = Depends(current_user),
+):
+    limit = max(1, min(limit, 500))
+    with db_connect() as conn:
+        _room_visible(conn, room_id, user)
+        if after_id:
+            rows = conn.execute(
+                "SELECT * FROM room_messages WHERE room_id = ? AND id > ? ORDER BY id LIMIT ?",
+                (room_id, after_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM (SELECT * FROM room_messages WHERE room_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id",
+                (room_id, limit),
+            ).fetchall()
+    return {"messages": [dict(r) for r in rows]}
+
+
+@app.post("/api/rooms/{room_id}/messages")
+def api_room_post_message(
+    room_id: str,
+    body: RoomMessageBody,
+    user: dict[str, Any] = Depends(current_user),
+):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty content")
+    if len(content) > 32000:
+        raise HTTPException(status_code=413, detail="message too large")
+    msg_id = uuid.uuid4().hex
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        _room_visible(conn, room_id, user)
+        conn.execute(
+            """
+            INSERT INTO room_messages
+                (id, room_id, sender_kind, sender_user_id, sender_backend_name,
+                 content, agent_turn_id, in_reply_to_message_id, created_at)
+            VALUES (?, ?, 'user', ?, '', ?, NULL, NULL, ?)
+            """,
+            (msg_id, room_id, user["id"], content, now),
+        )
+    return {"ok": True, "id": msg_id, "created_at": now}
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
