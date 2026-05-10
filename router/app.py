@@ -122,6 +122,11 @@ INVITE_CODE = os.getenv("INVITE_CODE", "").strip()  # empty = no invite required
 
 REAPER_INTERVAL_SECONDS = env_int("REAPER_INTERVAL_SECONDS", 30)
 DEFAULT_IDLE_SECONDS = env_int("DEFAULT_IDLE_SECONDS", 600)
+ROOM_MAX_CONSEC_AGENT_TURNS = env_int("ROOM_MAX_CONSEC_AGENT_TURNS", 6)
+ROOM_COOLDOWN_SECONDS = env_int("ROOM_COOLDOWN_SECONDS", 60)
+ROOM_TRANSCRIPT_TAIL = env_int("ROOM_TRANSCRIPT_TAIL", 30)
+ROOM_RUNNER_MAX_TOKENS = env_int("ROOM_RUNNER_MAX_TOKENS", 512)
+ROOM_RUNNER_TIMEOUT_SECS = env_int("ROOM_RUNNER_TIMEOUT_SECS", 120)
 MIN_IDLE_SECONDS = env_int("MIN_IDLE_SECONDS", 60)
 MAX_IDLE_SECONDS = env_int("MAX_IDLE_SECONDS", 6 * 3600)
 
@@ -2045,8 +2050,263 @@ def healthz():
 
 
 # ---------------------------------------------------------------------------
-# Rooms (phase 1: user-only chat; runner integration in phase 2)
+# Rooms (phase 2: runner broadcast + anti-loop cooldown)
 # ---------------------------------------------------------------------------
+
+
+_ROOM_RUNTIME: dict[str, dict[str, Any]] = {}
+_ROOM_RUNTIME_LOCK = threading.Lock()
+
+
+def _room_state(room_id: str) -> dict[str, Any]:
+    with _ROOM_RUNTIME_LOCK:
+        st = _ROOM_RUNTIME.get(room_id)
+        if st is None:
+            st = {
+                "consec_agent": 0,
+                "cooldown_until": 0.0,
+                "dispatch_locks": {},  # (user_id, backend) -> asyncio.Lock
+                "last_user_msg_at": 0.0,
+            }
+            _ROOM_RUNTIME[room_id] = st
+        return st
+
+
+def _backend_short_name(backend_name: str) -> str:
+    return backend_name.split("-", 1)[0]
+
+
+def _runner_handles(owner_slug: str, backend_name: str) -> list[str]:
+    short = _backend_short_name(backend_name)
+    handles = [f"@{owner_slug}", f"@{owner_slug}/{short}", f"@{owner_slug}/{backend_name}"]
+    return [h.lower() for h in handles]
+
+
+def _runner_should_respond(content: str, owner_slug: str, backend_name: str, mode: str) -> bool:
+    if mode == "active":
+        return True
+    body = content.lower()
+    return any(h in body for h in _runner_handles(owner_slug, backend_name))
+
+
+def _format_room_transcript_for_runner(
+    rows: list[dict[str, Any]],
+    user_lookup: dict[str, dict[str, Any]],
+    me_user_id: str,
+    me_backend: str,
+) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for r in rows:
+        sender_user = user_lookup.get(r["sender_user_id"]) or {}
+        slug = sender_user.get("slug") or "unknown"
+        if r["sender_kind"] == "runner":
+            tag = f"{slug}/{_backend_short_name(r['sender_backend_name'])}"
+            is_me = (r["sender_user_id"] == me_user_id and r["sender_backend_name"] == me_backend)
+        else:
+            tag = slug
+            is_me = False
+        if is_me:
+            out.append({"role": "assistant", "content": r["content"]})
+        else:
+            out.append({"role": "user", "content": f"{tag}: {r['content']}"})
+    return out
+
+
+def _insert_runner_message(
+    room_id: str,
+    owner_user_id: str,
+    backend_name: str,
+    content: str,
+    agent_turn_id: str,
+    in_reply_to: str | None,
+) -> tuple[str, int]:
+    msg_id = uuid.uuid4().hex
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO room_messages
+                (id, room_id, sender_kind, sender_user_id, sender_backend_name,
+                 content, agent_turn_id, in_reply_to_message_id, created_at)
+            VALUES (?, ?, 'runner', ?, ?, ?, ?, ?, ?)
+            """,
+            (msg_id, room_id, owner_user_id, backend_name, content,
+             agent_turn_id, in_reply_to, now),
+        )
+    return msg_id, now
+
+
+async def _runner_chat_completion(
+    owner: dict[str, Any],
+    backend_name: str,
+    messages: list[dict[str, str]],
+) -> str:
+    backend_def = BACKENDS.get(backend_name)
+    if backend_def is None:
+        raise RuntimeError(f"unknown backend {backend_name}")
+    runner = await asyncio.to_thread(MANAGER.ensure, owner, backend_name)
+    MANAGER.touch(owner["id"], backend_name)
+    url = f"http://{BACKEND_HOST}:{runner['host_port']}/v1/chat/completions"
+    headers = {
+        "content-type": "application/json",
+        backend_def.api_key_header: f"{backend_def.api_key_scheme} {runner['api_key']}".strip(),
+    }
+    if backend_def.name == "hermes-agent":
+        headers["X-Hermes-Session-Id"] = f"agstack-room-{owner['id']}-{backend_name}"
+    payload = {
+        "model": backend_name,
+        "messages": messages,
+        "stream": False,
+        "max_tokens": ROOM_RUNNER_MAX_TOKENS,
+    }
+    timeout = httpx.Timeout(connect=10.0, read=ROOM_RUNNER_TIMEOUT_SECS, write=60.0, pool=None)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(f"unexpected runner response: {data}") from exc
+
+
+async def _dispatch_room_message(room_id: str, trigger_msg_id: str) -> None:
+    """Phase 2a: when a new room message lands, fan out to approved runners.
+
+    Skips:
+      - the sender itself (no self-loop)
+      - passive runners that aren't @mentioned
+      - runners during cooldown
+      - paused rooms
+
+    Runner replies are themselves room_messages, which trigger another
+    dispatch cycle (recursive, capped by consec_agent counter -> cooldown).
+    """
+    try:
+        with db_connect() as conn:
+            room = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
+            if not room or room["paused"]:
+                return
+            trigger = conn.execute(
+                "SELECT * FROM room_messages WHERE id = ?", (trigger_msg_id,)
+            ).fetchone()
+            if not trigger:
+                return
+            members = [
+                dict(m) for m in conn.execute(
+                    """
+                    SELECT * FROM room_members
+                     WHERE room_id = ? AND kind = 'runner' AND status = 'approved'
+                    """,
+                    (room_id,),
+                ).fetchall()
+            ]
+            user_ids = {trigger["sender_user_id"], *(m["user_id"] for m in members)}
+            users = {}
+            if user_ids:
+                placeholders = ",".join("?" for _ in user_ids)
+                for u in conn.execute(
+                    f"SELECT * FROM users WHERE id IN ({placeholders})",
+                    tuple(user_ids),
+                ).fetchall():
+                    users[u["id"]] = dict(u)
+            tail_rows = [
+                dict(r) for r in conn.execute(
+                    """
+                    SELECT * FROM (
+                        SELECT * FROM room_messages WHERE room_id = ?
+                        ORDER BY id DESC LIMIT ?
+                    ) ORDER BY id
+                    """,
+                    (room_id, ROOM_TRANSCRIPT_TAIL),
+                ).fetchall()
+            ]
+        trigger = dict(trigger)
+        st = _room_state(room_id)
+        # turn accounting
+        if trigger["sender_kind"] == "user":
+            st["consec_agent"] = 0
+            st["last_user_msg_at"] = time.time()
+            st["cooldown_until"] = 0.0
+        else:
+            st["consec_agent"] = st.get("consec_agent", 0) + 1
+            if st["consec_agent"] >= ROOM_MAX_CONSEC_AGENT_TURNS:
+                st["cooldown_until"] = time.time() + ROOM_COOLDOWN_SECONDS
+                log.info(
+                    "room %s entering cooldown (consec_agent=%d) for %ds",
+                    room_id, st["consec_agent"], ROOM_COOLDOWN_SECONDS,
+                )
+
+        if time.time() < st.get("cooldown_until", 0.0):
+            return
+
+        for m in members:
+            # skip the sender itself
+            if (trigger["sender_kind"] == "runner"
+                and trigger["sender_user_id"] == m["user_id"]
+                and trigger["sender_backend_name"] == m["backend_name"]):
+                continue
+            owner = users.get(m["user_id"])
+            if not owner:
+                continue
+            if not _runner_should_respond(
+                trigger["content"], owner["slug"], m["backend_name"], m["mode"]
+            ):
+                continue
+            asyncio.create_task(_run_one_runner_turn(
+                room_id, m, owner, tail_rows, users, trigger_msg_id,
+            ))
+    except Exception:  # pragma: no cover
+        log.exception("dispatch_room_message failed for room=%s msg=%s", room_id, trigger_msg_id)
+
+
+async def _run_one_runner_turn(
+    room_id: str,
+    member: dict[str, Any],
+    owner: dict[str, Any],
+    tail_rows: list[dict[str, Any]],
+    users: dict[str, dict[str, Any]],
+    trigger_msg_id: str,
+) -> None:
+    st = _room_state(room_id)
+    key = (member["user_id"], member["backend_name"])
+    lock = st["dispatch_locks"].get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        st["dispatch_locks"][key] = lock
+    if lock.locked():
+        return  # already mid-turn, don't queue
+    async with lock:
+        try:
+            messages = [{
+                "role": "system",
+                "content": (
+                    f"You are {owner['slug']}'s {_backend_short_name(member['backend_name'])} "
+                    "agent in a multi-party chatroom. Other participants address you with "
+                    f"@{owner['slug']} or @{owner['slug']}/{_backend_short_name(member['backend_name'])}. "
+                    "Reply briefly (a few sentences). Do not impersonate others. "
+                    "If you have nothing to add, reply with the single word: pass."
+                ),
+            }]
+            messages.extend(_format_room_transcript_for_runner(
+                tail_rows, users, member["user_id"], member["backend_name"],
+            ))
+            content = await _runner_chat_completion(owner, member["backend_name"], messages)
+            if not content or content.lower().strip().rstrip(".") == "pass":
+                return
+            agent_turn_id = uuid.uuid4().hex
+            new_msg_id, _ = await asyncio.to_thread(
+                _insert_runner_message,
+                room_id, owner["id"], member["backend_name"], content,
+                agent_turn_id, trigger_msg_id,
+            )
+            # Recurse so other runners can react.
+            asyncio.create_task(_dispatch_room_message(room_id, new_msg_id))
+        except Exception:
+            log.exception(
+                "runner turn failed: room=%s user=%s backend=%s",
+                room_id, member["user_id"], member["backend_name"],
+            )
 
 
 class RoomCreateBody(BaseModel):
@@ -2296,7 +2556,7 @@ def api_room_messages(
 
 
 @app.post("/api/rooms/{room_id}/messages")
-def api_room_post_message(
+async def api_room_post_message(
     room_id: str,
     body: RoomMessageBody,
     user: dict[str, Any] = Depends(current_user),
@@ -2319,6 +2579,7 @@ def api_room_post_message(
             """,
             (msg_id, room_id, user["id"], content, now),
         )
+    asyncio.create_task(_dispatch_room_message(room_id, msg_id))
     return {"ok": True, "id": msg_id, "created_at": now}
 
 
