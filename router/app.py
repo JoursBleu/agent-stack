@@ -2056,6 +2056,34 @@ def healthz():
 
 _ROOM_RUNTIME: dict[str, dict[str, Any]] = {}
 _ROOM_RUNTIME_LOCK = threading.Lock()
+_ROOM_SUBSCRIBERS: dict[str, list[asyncio.Queue]] = {}
+_ROOM_SUB_LOCK = threading.Lock()
+
+
+def _room_subscribers(room_id: str) -> list[asyncio.Queue]:
+    with _ROOM_SUB_LOCK:
+        return list(_ROOM_SUBSCRIBERS.get(room_id, ()))
+
+
+def _publish_room_event(room_id: str, kind: str, payload: dict[str, Any]) -> None:
+    """Best-effort fan-out to per-room SSE subscribers.
+
+    Safe to call from any thread / from sync code: each queue's loop is
+    captured at subscribe time and used via call_soon_threadsafe.
+    """
+    event = {"kind": kind, "payload": payload}
+    for q in _room_subscribers(room_id):
+        loop = getattr(q, "_room_loop", None)
+        if loop is None or loop.is_closed():
+            continue
+        try:
+            loop.call_soon_threadsafe(q.put_nowait, event)
+        except Exception:  # pragma: no cover
+            pass
+
+
+def _row_to_dict(row) -> dict[str, Any]:
+    return {k: row[k] for k in row.keys()} if row is not None else {}
 
 
 def _room_state(room_id: str) -> dict[str, Any]:
@@ -2133,6 +2161,17 @@ def _insert_runner_message(
             (msg_id, room_id, owner_user_id, backend_name, content,
              agent_turn_id, in_reply_to, now),
         )
+        owner_row = conn.execute(
+            "SELECT slug FROM users WHERE id = ?", (owner_user_id,),
+        ).fetchone()
+    _publish_room_event(room_id, "message", {
+        "id": msg_id, "room_id": room_id, "sender_kind": "runner",
+        "sender_user_id": owner_user_id,
+        "sender_user_slug": (owner_row["slug"] if owner_row else None),
+        "sender_backend_name": backend_name, "content": content,
+        "agent_turn_id": agent_turn_id, "in_reply_to_message_id": in_reply_to,
+        "created_at": now,
+    })
     return msg_id, now
 
 
@@ -2462,6 +2501,11 @@ def api_room_join(room_id: str, body: RoomJoinBody, user: dict[str, Any] = Depen
             )
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="already requested or member")
+    _publish_room_event(room_id, "member", {
+        "action": "join", "kind": body.kind, "user_id": user["id"],
+        "user_slug": user.get("slug"), "backend_name": body.backend_name,
+        "status": status,
+    })
     return {"ok": True, "status": status}
 
 
@@ -2579,8 +2623,56 @@ async def api_room_post_message(
             """,
             (msg_id, room_id, user["id"], content, now),
         )
+    _publish_room_event(room_id, "message", {
+        "id": msg_id, "room_id": room_id, "sender_kind": "user",
+        "sender_user_id": user["id"], "sender_user_slug": user.get("slug"),
+        "sender_backend_name": "", "content": content,
+        "agent_turn_id": None, "in_reply_to_message_id": None,
+        "created_at": now,
+    })
     asyncio.create_task(_dispatch_room_message(room_id, msg_id))
     return {"ok": True, "id": msg_id, "created_at": now}
+
+
+@app.get("/api/rooms/{room_id}/stream")
+async def api_room_stream(room_id: str, user: dict[str, Any] = Depends(current_user)):
+    """Server-sent events stream of room activity (messages + member changes).
+
+    Authn via the same JWT/cookie path as everything else. Visibility
+    is enforced once on subscribe; if membership later changes the client
+    will simply continue receiving messages until they reconnect (good
+    enough for v1).
+    """
+    with db_connect() as conn:
+        _room_visible(conn, room_id, user)
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue._room_loop = loop  # type: ignore[attr-defined]
+    with _ROOM_SUB_LOCK:
+        _ROOM_SUBSCRIBERS.setdefault(room_id, []).append(queue)
+
+    async def gen():
+        try:
+            yield b'data: {"kind":"hello"}\n\n'
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25)
+                except asyncio.TimeoutError:
+                    yield b': keepalive\n\n'
+                    continue
+                yield ("data: " + json.dumps(event) + "\n\n").encode()
+        finally:
+            with _ROOM_SUB_LOCK:
+                lst = _ROOM_SUBSCRIBERS.get(room_id, [])
+                if queue in lst:
+                    lst.remove(queue)
+                if not lst:
+                    _ROOM_SUBSCRIBERS.pop(room_id, None)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 
 # ---------------------------------------------------------------------------
