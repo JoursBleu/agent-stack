@@ -79,5 +79,42 @@
     "chown_uid": 0,
     "chown_gid": 0,
     "default_idle_seconds": 600
+  },
+  {
+    "name": "nanobot",
+    "display_name": "Nanobot (MCP Host)",
+    "image": "ghcr.io/obot-platform/nanobot:latest",
+    "container_prefix": "agstack-nanobot",
+    "internal_port": 8080,
+    "health_path": "/",
+    "ready_path": "/",
+    "extra_models": [],
+    "api_key_env": "NANOBOT_RUNNER_TOKEN",
+    "api_key_header": "Authorization",
+    "api_key_scheme": "Bearer",
+    "seed_subdir": "nanobot-home",
+    "mount_target": "/data",
+    "extra_env": {
+      "NANOBOT_RUN_LISTEN_ADDRESS": "0.0.0.0:8080",
+      "NANOBOT_STATE": "/data/nanobot.db"
+    },
+    "user_overridable_env": [
+      "LLM_BASE_URL",
+      "LLM_API_KEY",
+      "LLM_MODEL",
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY"
+    ],
+    "templated_files": [
+      "nanobot.yaml"
+    ],
+    "cmd": [
+      "run",
+      "/data/nanobot.yaml"
+    ],
+    "user": "nanobot",
+    "chown_uid": 1000,
+    "chown_gid": 1000,
+    "default_idle_seconds": 1800
   }
 ]

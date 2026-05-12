@@ -1,0 +1,25 @@
+# Default Nanobot config for agent-stack runners.
+#
+# This is a minimal MCP host that points at whatever upstream OpenAI-compatible
+# endpoint the user configured under "Backend settings → LLM_BASE_URL / LLM_MODEL
+# / LLM_API_KEY".
+#
+# To customize: open the runner's UI at  http://<host>:<runner_port>/  and use
+# its in-app config, OR edit this file under your per-user data directory and
+# restart the runner.
+#
+# Reference: https://github.com/obot-platform/nanobot
+
+llmProviders:
+  upstream:
+    dialect: OpenAIChatCompletions
+    baseURL: ${LLM_BASE_URL}
+    apiKey: ${LLM_API_KEY}
+
+agents:
+  main:
+    name: Main
+    model: upstream/${LLM_MODEL}
+    instructions: |
+      You are a helpful assistant running inside an agent-stack Nanobot runner.
+      You can use any MCP servers configured for this agent.
