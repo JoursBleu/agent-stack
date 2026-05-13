@@ -90,3 +90,24 @@ OpenClaw 没原生 A→B channel；要做需要 router 层注入工具：
 - 路径 B（A、B 像群聊互发，双向可见）：DB 改 chat ↔ agent N:N，UI 加群聊视图
 
 待用户决定哪种。
+
+---
+
+## 5. Upstream LLM 兼容性：reasoning 与 function tools
+
+OpenClaw 的 seed `seeds/openclaw-home/openclaw.json` 里每个 model entry 有
+`reasoning: true|false`：
+
+- `true` → 请求时带 `reasoning_effort: <thinking-level>`（默认 medium）。
+- `false` → 不带 `reasoning_effort`，按普通 chat-completions 走。
+
+**坑**：Azure 的 gpt-5.5 不允许 *function tools + reasoning_effort* 同时出现，
+返回 `400 Function tools with reasoning_effort are not supported for this model`。
+OpenClaw 会自动重试一次（"unsupported thinking level ... retrying with off"），
+但第一次 400 + 重试加起来一条消息要 ~2 分钟，UI 上会显得"agent 一直不回复"。
+
+仓库 seed 的默认值是 `reasoning: false`，正好绕开这条限制。如果你想恢复
+reasoning：
+
+- 换一个支持 reasoning + function tools 同时出现的 upstream，或
+- 在 router 侧拦截请求把 `reasoning_effort` 字段剥掉。

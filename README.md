@@ -467,6 +467,10 @@ endpoints work).
   model, CSRF/Origin header stripping, container lifecycle, troubleshooting
 - [docs/openclaw-multi-agent.md](docs/openclaw-multi-agent.md) — OpenClaw
   per-user agent layout
+- [docs/nanobot-integration.md](docs/nanobot-integration.md) — nanobot
+  (HKUDS) backend wiring
+- [docs/rooms.md](docs/rooms.md) — multi-user / multi-agent rooms:
+  private vs public, room-admin role, discover & approval flow
 - [docs/per-user-env-overrides.md](docs/per-user-env-overrides.md) —
   per-user backend env override (incl. upstream LLM key)
 - [images/openclaw/README.md](images/openclaw/README.md) — building or

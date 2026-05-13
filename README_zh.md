@@ -297,6 +297,10 @@ endpoint 能用。**
   session 模型、CSRF/Origin 处理、容器生命周期、排错
 - [docs/openclaw-multi-agent.md](docs/openclaw-multi-agent.md) ——
   OpenClaw 多 agent 在 agent-stack 里的形态
+- [docs/nanobot-integration.md](docs/nanobot-integration.md) ——
+  nanobot (HKUDS) backend 接入
+- [docs/rooms.md](docs/rooms.md) —— 多人 / 多 agent rooms：
+  私密 vs 公开、房间管理员、Discover 与审批流程
 - [docs/per-user-env-overrides.md](docs/per-user-env-overrides.md) ——
   用户级 backend env 覆盖（含上游 LLM key）
 - [images/openclaw/README.md](images/openclaw/README.md) —— 怎么 build
