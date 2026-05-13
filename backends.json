@@ -36,7 +36,10 @@
     "user": "node",
     "chown_uid": 1000,
     "chown_gid": 1000,
-    "default_idle_seconds": 600
+    "default_idle_seconds": 600,
+    "extra_networks": [
+      "amd-bridge-standalone_default"
+    ]
   },
   {
     "name": "hermes-agent",
@@ -78,43 +81,43 @@
     "user": "root",
     "chown_uid": 0,
     "chown_gid": 0,
-    "default_idle_seconds": 600
+    "default_idle_seconds": 600,
+    "extra_networks": [
+      "amd-bridge-standalone_default"
+    ]
   },
   {
     "name": "nanobot",
-    "display_name": "Nanobot (MCP Host)",
-    "image": "ghcr.io/obot-platform/nanobot:latest",
+    "display_name": "nanobot (HKUDS)",
+    "image": "agstack/nanobot-hkuds:0.1.5.post3",
     "container_prefix": "agstack-nanobot",
-    "internal_port": 8080,
-    "health_path": "/",
-    "ready_path": "/",
-    "extra_models": [],
-    "api_key_env": "NANOBOT_RUNNER_TOKEN",
-    "api_key_header": "Authorization",
-    "api_key_scheme": "Bearer",
+    "internal_port": 8900,
+    "health_path": "/health",
+    "ready_path": "/v1/models",
+    "extra_models": [
+      "nanobot/main"
+    ],
+    "forward_model_env": "LLM_MODEL",
     "seed_subdir": "nanobot-home",
-    "mount_target": "/data",
-    "extra_env": {
-      "NANOBOT_RUN_LISTEN_ADDRESS": "0.0.0.0:8080",
-      "NANOBOT_STATE": "/data/nanobot.db"
-    },
+    "mount_target": "/home/nanobot/.nanobot",
+    "extra_env": {},
     "user_overridable_env": [
       "LLM_BASE_URL",
       "LLM_API_KEY",
-      "LLM_MODEL",
-      "OPENAI_API_KEY",
-      "ANTHROPIC_API_KEY"
+      "LLM_MODEL"
     ],
     "templated_files": [
-      "nanobot.yaml"
+      "config.json"
     ],
     "cmd": [
-      "run",
-      "/data/nanobot.yaml"
+      "serve"
     ],
     "user": "nanobot",
     "chown_uid": 1000,
     "chown_gid": 1000,
-    "default_idle_seconds": 1800
+    "default_idle_seconds": 1800,
+    "extra_networks": [
+      "amd-bridge-standalone_default"
+    ]
   }
 ]

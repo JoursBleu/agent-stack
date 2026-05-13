@@ -183,6 +183,12 @@ class Backend(BaseModel):
     dns: list[str] = []  # custom DNS servers for the container
     default_idle_seconds: int = DEFAULT_IDLE_SECONDS
     disabled: bool = False  # placeholder backend; visible in /api/backends but cannot be spawned
+    # When set, the v1 proxy and room dispatch will rewrite the request body's
+    # `model` field to the user's effective value of this env var before
+    # forwarding upstream. Use this for backends like nanobot that strictly
+    # validate the request `model` against their own configured model id and
+    # reject anything else (including the canonical "<backend>/main" alias).
+    forward_model_env: str | None = None
 
     def serves_model(self, model: str) -> bool:
         if not model:
@@ -1631,9 +1637,11 @@ async def v1_proxy(path: str, request: Request, user: dict[str, Any] = Depends(c
     body = await request.body()
     model_id = ""
     user_field = ""
+    parsed_payload: dict[str, Any] | None = None
     if body:
         try:
             payload = json.loads(body)
+            parsed_payload = payload if isinstance(payload, dict) else None
             model_id = str(payload.get("model") or "")
             user_field = str(payload.get("user") or "")
         except Exception:
@@ -1649,8 +1657,28 @@ async def v1_proxy(path: str, request: Request, user: dict[str, Any] = Depends(c
     runner = await asyncio.to_thread(MANAGER.ensure, user, backend_def.name)
     MANAGER.touch(user["id"], backend_def.name)
 
+    # If the backend is strict about the upstream `model` field (e.g. nanobot
+    # rejects anything except its single configured model id), rewrite the
+    # request body's model field to the user's effective value of the env var
+    # the backend was templated with.
+    if (
+        backend_def.forward_model_env
+        and parsed_payload is not None
+        and parsed_payload.get("model")
+    ):
+        eff_env = MANAGER.get_effective_env_for_backend(user["id"], backend_def.name)
+        upstream_model = eff_env.get(backend_def.forward_model_env)
+        if upstream_model and upstream_model != parsed_payload.get("model"):
+            parsed_payload["model"] = upstream_model
+            body = json.dumps(parsed_payload).encode()
+
     upstream_url = f"http://{BACKEND_HOST}:{runner['host_port']}/v1/{path}"
     headers = _proxy_headers(request, runner["api_key"], backend_def)
+    # Body may have been mutated by forward_model_env rewrite above; drop any
+    # client-supplied Content-Length so httpx recomputes it from the new body.
+    for k in list(headers):
+        if k.lower() == "content-length":
+            headers.pop(k)
 
     # Hermes Agent derives a session id from sha256(system + first user msg)
     # by default, which collides whenever two conversations start with the
@@ -2192,8 +2220,12 @@ async def _runner_chat_completion(
     }
     if backend_def.name == "hermes-agent":
         headers["X-Hermes-Session-Id"] = f"agstack-room-{owner['id']}-{backend_name}"
+    upstream_model = backend_name
+    if backend_def.forward_model_env:
+        eff_env = MANAGER.get_effective_env_for_backend(owner["id"], backend_name)
+        upstream_model = eff_env.get(backend_def.forward_model_env) or backend_name
     payload = {
-        "model": backend_name,
+        "model": upstream_model,
         "messages": messages,
         "stream": False,
         "max_tokens": ROOM_RUNNER_MAX_TOKENS,
