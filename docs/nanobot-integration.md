@@ -121,9 +121,22 @@ RuntimeError: No API key configured for provider 'None'.
 
 注释只能放在隔壁 README，不要混进 config。
 
-### 2. `agents.defaults.provider="custom"` 必须填齐 `providers.custom.{apiKey, apiBase}`
+### 2. `agents.defaults.provider` 要填 nanobot registry 里已知的 provider 名
 
-按 nanobot 的 provider 解析顺序，custom provider 没有 fallback 到 env var——必须 config 里就有。我们的 seed 用 `${LLM_API_KEY}` `${LLM_BASE_URL}` 占位符让 router 在 `_ensure_user_home` 时填进去。
+常用选项（完整表看 [`providers/registry.py`](https://github.com/HKUDS/nanobot/blob/main/nanobot/providers/registry.py)）：`openai` / `anthropic` / `deepseek` / `gemini` / `dashscope` / `zhipu` / `moonshot` / `groq` / `openrouter` / `vllm` / `ollama`。填对名字 nanobot 才能拿到 `ProviderSpec`——里面带了这家上游的 quirks（是否支持 `max_completion_tokens`、是否 prompt caching、thinking 如何传递、per-model param overrides…）。选 `custom` 等于让 nanobot “走最保守路OpenAI 子集”——可以跳但容易踩到新模型的快路。
+
+例：上游是 Anthropic 原生时，seed 要写
+
+```json
+{"providers": {"anthropic": {"apiKey": "${LLM_API_KEY}"}},
+ "agents": {"defaults": {"provider": "anthropic", "model": "${LLM_MODEL}"}}}
+```
+
+这样 nanobot 才会启用 prompt caching，也才会识别 extended thinking 参数。
+
+### 3. `agents.defaults.provider="openai"` 下还是要填齐 `providers.openai.{apiKey, apiBase}`
+
+按 nanobot 的 provider 解析顺序，`providers.<name>.apiKey` 会 fallback 到该 spec 的 `env_key`（对 OpenAI 是 `OPENAI_API_KEY`）。我们 seed 用 `${LLM_API_KEY}` `${LLM_BASE_URL}` 占位符让 router 在 `_ensure_user_home` 时填进去，所以 nanobot 启动时 config 里已经是实值。
 
 ### 3. `nanobot serve` 默认只 listen `127.0.0.1:8900`
 
@@ -133,9 +146,9 @@ RuntimeError: No API key configured for provider 'None'.
 
 `apiKey` / `api_key` 等价；`apiBase` / `api_base` 等价。我们 seed 里统一用 camelCase（HKUDS 自家文档示例风格）。
 
-### 5. nanobot 不接受 `max_completion_tokens`，只认 `max_tokens`
+### 5. nanobot 会自动在 `max_tokens` / `max_completion_tokens` 之间切换，但仅在 spec 认识上游时
 
-如果上游是 OpenAI gpt-5.x（reasoning models）会拒掉 `max_tokens`，要求 `max_completion_tokens`——这种组合 nanobot 没适配。可用的上游模型例子：`gpt-4.1-mini`、`gpt-4o`、`Claude-Sonnet-4` 等接受 `max_tokens` 的模型。
+只要 `agents.defaults.provider` 填的是一个在 nanobot registry 里 已登记为“reasoning models 上游”的 provider（如 `openai` `github_copilot`），nanobot 会对 `gpt-5.x` / `o1` / `o3` / `o4` 这些模型自动发 `max_completion_tokens` 而不是 `max_tokens`。填 `custom` 会丢掉这层逻辑——见上面「为什么是 openai 不是 custom」。
 
 ## 已知未做
 
