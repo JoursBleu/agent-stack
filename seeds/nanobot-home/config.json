@@ -1,13 +1,13 @@
 {
   "providers": {
-    "custom": {
+    "openai": {
       "apiKey": "${LLM_API_KEY}",
       "apiBase": "${LLM_BASE_URL}"
     }
   },
   "agents": {
     "defaults": {
-      "provider": "custom",
+      "provider": "openai",
       "model": "${LLM_MODEL}",
       "maxTokens": 8192,
       "temperature": 0.2,
