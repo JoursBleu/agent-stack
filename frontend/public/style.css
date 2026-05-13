@@ -552,3 +552,42 @@ input, textarea, select { font: inherit; }
 .rooms-composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border-soft); }
 .rooms-composer textarea { flex: 1; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 8px; resize: none; font-family: inherit; font-size: 14px; background: var(--surface); color: var(--text); }
 .rooms-composer button { align-self: flex-end; }
+
+/* ---- Add-member modal (chip picker) ---- */
+.add-row { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.add-row-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+.chip-group { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-group .chip {
+  display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 8px 14px; border-radius: 10px;
+  background: var(--surface-soft, var(--bg-elev, #f3f4f6));
+  border: 1px solid var(--border-soft);
+  color: var(--text);
+  cursor: pointer; font-size: 13px; line-height: 1.2;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.chip-group .chip:hover { border-color: var(--accent); }
+.chip-group .chip.active {
+  background: var(--accent); color: var(--accent-text);
+  border-color: var(--accent);
+}
+.chip-group .chip .chip-title { font-weight: 600; }
+.chip-group .chip .chip-sub { font-size: 11px; opacity: .75; }
+
+/* role badges */
+.rooms-member-row .badge.owner { background: #fff4d6; color: #8a5a00; border-color: #f0d080; }
+.rooms-member-row .badge.admin { background: #e0f0ff; color: #1d4ed8; border-color: #b8d4ff; }
+
+/* discover view */
+.rooms-discover { padding: 16px; overflow-y: auto; flex: 1; }
+.rooms-discover .discover-header { font-size: 14px; margin-bottom: 12px; color: var(--text); }
+.rooms-discover .discover-list { display: flex; flex-direction: column; gap: 10px; }
+.rooms-discover .discover-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: 10px;
+  background: var(--surface, var(--bg-base));
+}
+.rooms-discover .discover-card:hover { border-color: var(--accent); }
+.rooms-discover .discover-title { font-size: 14px; font-weight: 600; color: var(--text-strong); }
+.rooms-discover .discover-meta  { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.rooms-discover .discover-actions button { font-size: 12px; padding: 6px 12px; }

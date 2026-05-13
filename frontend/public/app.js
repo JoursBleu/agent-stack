@@ -1484,12 +1484,11 @@ async function roomsOpen(id) {
   roomsCloseSse();
   Rooms.messages = [];
   Rooms.lastSeenId = null;
-  Rooms.membersOpen = false;
   const r = await api("GET", `/api/rooms/${id}`);
-  Rooms.current = { ...r.room, members: r.members, is_owner: r.is_owner };
+  Rooms.current = { ...r.room, members: r.members, is_owner: r.is_owner, my_role: r.my_role, is_moderator: r.is_moderator };
   $("#rooms-detail-empty").classList.add("hidden");
+  $("#rooms-discover-view")?.classList.add("hidden");
   $("#rooms-detail").classList.remove("hidden");
-  $("#rooms-members-panel").classList.add("hidden");
   roomsRenderHeader();
   await roomsLoadMessages();
   roomsRenderMessages();
@@ -1502,21 +1501,29 @@ function roomsRenderHeader() {
   $("#rooms-detail-title").textContent = r.title;
   const approved = r.members.filter(m => m.status === "approved");
   const pending  = r.members.filter(m => m.status === "pending");
+  const visLabel = r.visibility === "public" ? "🌐 public" : "🔒 private";
   $("#rooms-detail-meta").textContent =
     `${approved.length} member(s)` +
     (pending.length ? ` · ${pending.length} pending` : "") +
+    ` · ${visLabel}` +
     (r.paused ? " · paused" : "") +
-    (r.is_owner ? " · you own" : "");
+    (r.is_owner ? " · you own" : (r.my_role === "admin" ? " · admin" : ""));
   $("#rooms-pause-btn").textContent = r.paused ? "Resume" : "Pause";
   $("#rooms-pause-btn").classList.toggle("hidden", !r.is_owner);
   $("#rooms-leave-btn").classList.toggle("hidden", !r.is_owner);
+  const visBtn = $("#rooms-visibility-btn");
+  if (visBtn) {
+    visBtn.textContent = r.visibility === "public" ? "Make private" : "Make public";
+    visBtn.classList.toggle("hidden", !r.is_owner);
+  }
   roomsRenderMembers();
 }
 
 function roomsRenderMembers() {
   const panel = $("#rooms-members-panel");
   const r = Rooms.current;
-  const isOwner = r.is_owner;
+  const isOwner = !!r.is_owner;
+  const isMod = !!r.is_moderator;
   panel.innerHTML = `
     <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
       <strong>Members</strong>
@@ -1526,18 +1533,26 @@ function roomsRenderMembers() {
     </div>
     ${r.members.map(m => {
       const slug = m.user_slug || m.user_id.slice(0, 6);
+      const isOwnerRow = m.kind === "user" && m.user_id === r.owner_user_id;
+      const roleBadge = isOwnerRow
+        ? '<span class="badge owner">owner</span>'
+        : (m.role === "admin" ? '<span class="badge admin">admin</span>' : "");
       const label = m.kind === "runner"
         ? `${escapeHtml(slug)}/<span class="badge runner">${escapeHtml(m.backend_name)}</span> · mode=${m.mode}`
-        : escapeHtml(slug);
+        : `${escapeHtml(slug)} ${roleBadge}`;
       const statusBadge = m.status === "pending"  ? '<span class="badge pending">pending</span>'
                        : m.status === "rejected" ? '<span class="badge rejected">rejected</span>'
                        : '';
       let actions = "";
-      if (isOwner && m.status === "pending") {
+      if (isMod && m.status === "pending") {
         actions = `<button class="btn-primary" data-act="approve" data-uid="${m.user_id}" data-kind="${m.kind}" data-bn="${escapeHtml(m.backend_name)}">Approve</button>
                    <button class="btn-ghost"   data-act="reject"  data-uid="${m.user_id}" data-kind="${m.kind}" data-bn="${escapeHtml(m.backend_name)}">Reject</button>`;
-      } else if (isOwner && m.status === "approved" && !(m.kind === "user" && m.user_id === r.owner_user_id)) {
-        actions = `<button class="btn-ghost" data-act="remove" data-uid="${m.user_id}" data-kind="${m.kind}" data-bn="${escapeHtml(m.backend_name)}">Remove</button>`;
+      } else if (isMod && m.status === "approved" && !isOwnerRow) {
+        const promoteBtn = (isOwner && m.kind === "user" && m.role === "member")
+          ? `<button class="btn-ghost" data-act="promote" data-uid="${m.user_id}" title="Promote to admin">Promote</button>` : "";
+        const demoteBtn = (isOwner && m.kind === "user" && m.role === "admin")
+          ? `<button class="btn-ghost" data-act="demote" data-uid="${m.user_id}" title="Demote to member">Demote</button>` : "";
+        actions = `${promoteBtn}${demoteBtn}<button class="btn-ghost" data-act="remove" data-uid="${m.user_id}" data-kind="${m.kind}" data-bn="${escapeHtml(m.backend_name)}">Remove</button>`;
       }
       return `<div class="rooms-member-row">
         <div class="member-info">${label} ${statusBadge}</div>
@@ -1548,15 +1563,22 @@ function roomsRenderMembers() {
   panel.querySelector("#rooms-add-self-btn").addEventListener("click", roomsAddSelfDialog);
   panel.querySelectorAll("button[data-act]").forEach(b => {
     b.addEventListener("click", async () => {
-      const params = new URLSearchParams({
-        member_user_id: b.dataset.uid,
-        member_kind: b.dataset.kind,
-        backend_name: b.dataset.bn,
-      });
+      const act = b.dataset.act;
       try {
-        if (b.dataset.act === "approve") await api("POST", `/api/rooms/${r.id}/members/approve?${params}`);
-        else if (b.dataset.act === "reject") await api("POST", `/api/rooms/${r.id}/members/reject?${params}`);
-        else if (b.dataset.act === "remove") await api("DELETE", `/api/rooms/${r.id}/members?${params}`);
+        if (act === "promote") {
+          await api("POST", `/api/rooms/${r.id}/members/promote?member_user_id=${encodeURIComponent(b.dataset.uid)}`);
+        } else if (act === "demote") {
+          await api("POST", `/api/rooms/${r.id}/members/demote?member_user_id=${encodeURIComponent(b.dataset.uid)}`);
+        } else {
+          const params = new URLSearchParams({
+            member_user_id: b.dataset.uid,
+            member_kind: b.dataset.kind,
+            backend_name: b.dataset.bn,
+          });
+          if (act === "approve") await api("POST", `/api/rooms/${r.id}/members/approve?${params}`);
+          else if (act === "reject") await api("POST", `/api/rooms/${r.id}/members/reject?${params}`);
+          else if (act === "remove") await api("DELETE", `/api/rooms/${r.id}/members?${params}`);
+        }
         await roomsReloadCurrent();
       } catch (e) { alert(e.message); }
     });
@@ -1564,40 +1586,144 @@ function roomsRenderMembers() {
 }
 
 async function roomsAddSelfDialog() {
-  // Offer joining as user (if not yet) or as one of available backends as runner.
+  // Two-row picker: row 1 = who (myself / each available backend runner),
+  // row 2 = mode (passive / active, only when a runner is picked).
   const r = Rooms.current;
   const meRow = r.members.find(m => m.kind === "user" && m.user_id === State.user.id);
-  const choices = [];
-  if (!meRow) choices.push({ label: "Join as user (myself)", kind: "user", backend_name: "" });
-  // backends list
+  const canJoinSelf = !meRow;
+  let backends = [];
   try {
     const bs = await api("GET", "/api/backends");
     for (const b of (bs.backends || bs)) {
       const name = b.name || b;
       const exists = r.members.find(m => m.kind === "runner" && m.backend_name === name && m.user_id === State.user.id);
-      if (!exists) {
-        choices.push({ label: `Add my ${name} runner (passive)`, kind: "runner", backend_name: name, mode: "passive" });
-        choices.push({ label: `Add my ${name} runner (ACTIVE — chimes in freely)`, kind: "runner", backend_name: name, mode: "active" });
-      }
+      if (!exists) backends.push(name);
     }
   } catch {}
-  if (!choices.length) { alert("Nothing to add — you and all your runners are already in this room."); return; }
-  const txt = choices.map((c, i) => `${i+1}. ${c.label}`).join("\n");
-  const sel = prompt(`Choose what to add (number):\n\n${txt}`, "1");
-  if (!sel) return;
-  const idx = parseInt(sel, 10) - 1;
-  const c = choices[idx];
-  if (!c) return;
-  try {
-    await api("POST", `/api/rooms/${r.id}/join`, { kind: c.kind, backend_name: c.backend_name, mode: c.mode || "passive" });
-    await roomsReloadCurrent();
-  } catch (e) { alert(e.message); }
+  if (!canJoinSelf && !backends.length) {
+    alert("Nothing to add — you and all your runners are already in this room.");
+    return;
+  }
+  await showAddMemberModal(r.id, { canJoinSelf, backends });
+}
+
+function showAddMemberModal(roomId, { canJoinSelf, backends }) {
+  return new Promise((resolve) => {
+    // Build DOM
+    const overlay = document.createElement("div");
+    overlay.className = "modal";
+    overlay.id = "rooms-add-modal";
+    const subjectChips = [];
+    if (canJoinSelf) subjectChips.push({ id: "__self__", label: "Myself (user)", icon: "👤" });
+    for (const name of backends) subjectChips.push({ id: name, label: name, icon: "🤖" });
+
+    let pickedSubject = subjectChips[0]?.id || null;
+    let pickedMode = "passive";
+
+    overlay.innerHTML = `
+      <div class="modal-card modal-card--sm">
+        <div class="modal-header">
+          <h2>Add to this room</h2>
+          <button type="button" data-act="close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="add-row">
+            <div class="add-row-label">Who</div>
+            <div class="chip-group" data-group="subject"></div>
+          </div>
+          <div class="add-row" data-row="mode">
+            <div class="add-row-label">Mode</div>
+            <div class="chip-group" data-group="mode">
+              <button type="button" class="chip" data-val="passive" data-tip="Only speaks when @mentioned or directly addressed.">
+                <span class="chip-title">Passive</span>
+                <span class="chip-sub">only when asked</span>
+              </button>
+              <button type="button" class="chip" data-val="active" data-tip="Chimes in freely when it thinks it can help.">
+                <span class="chip-title">Active</span>
+                <span class="chip-sub">chimes in freely</span>
+              </button>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" data-act="close">Cancel</button>
+            <button type="button" class="btn-primary" data-act="ok">Add</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const subjectBox = overlay.querySelector('[data-group="subject"]');
+    for (const s of subjectChips) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chip";
+      btn.dataset.val = s.id;
+      btn.innerHTML = `<span class="chip-title">${s.icon} ${escapeHtml(s.label)}</span>`;
+      subjectBox.appendChild(btn);
+    }
+
+    const modeRow = overlay.querySelector('[data-row="mode"]');
+    function syncSelection() {
+      overlay.querySelectorAll('[data-group="subject"] .chip').forEach(c => {
+        c.classList.toggle("active", c.dataset.val === pickedSubject);
+      });
+      overlay.querySelectorAll('[data-group="mode"] .chip').forEach(c => {
+        c.classList.toggle("active", c.dataset.val === pickedMode);
+      });
+      // hide mode row when "myself" is picked
+      const isSelf = pickedSubject === "__self__";
+      modeRow.style.display = isSelf ? "none" : "";
+    }
+    syncSelection();
+
+    function close(result) {
+      overlay.remove();
+      resolve(result || null);
+    }
+
+    overlay.addEventListener("click", async (ev) => {
+      const t = ev.target.closest("[data-act], .chip");
+      if (!t) {
+        if (ev.target === overlay) close(null);
+        return;
+      }
+      if (t.classList.contains("chip")) {
+        const group = t.parentElement.dataset.group;
+        if (group === "subject") pickedSubject = t.dataset.val;
+        else if (group === "mode") pickedMode = t.dataset.val;
+        syncSelection();
+        return;
+      }
+      const act = t.dataset.act;
+      if (act === "close") { close(null); return; }
+      if (act === "ok") {
+        if (!pickedSubject) { close(null); return; }
+        try {
+          const isSelf = pickedSubject === "__self__";
+          await api("POST", `/api/rooms/${roomId}/join`, {
+            kind: isSelf ? "user" : "runner",
+            backend_name: isSelf ? "" : pickedSubject,
+            mode: isSelf ? "passive" : pickedMode,
+          });
+          close({ ok: true });
+          await roomsReloadCurrent();
+        } catch (e) {
+          alert(e.message);
+        }
+      }
+    });
+    document.addEventListener("keydown", function onKey(ev) {
+      if (!document.body.contains(overlay)) { document.removeEventListener("keydown", onKey); return; }
+      if (ev.key === "Escape") { close(null); document.removeEventListener("keydown", onKey); }
+    });
+  });
 }
 
 async function roomsReloadCurrent() {
   if (!Rooms.current) return;
   const r = await api("GET", `/api/rooms/${Rooms.current.id}`);
-  Rooms.current = { ...r.room, members: r.members, is_owner: r.is_owner };
+  Rooms.current = { ...r.room, members: r.members, is_owner: r.is_owner, my_role: r.my_role, is_moderator: r.is_moderator };
   roomsRenderHeader();
   await roomsRefreshList();
 }
@@ -1683,19 +1809,227 @@ $("#rooms-modal").addEventListener("click", (ev) => {
 });
 
 $("#rooms-new-btn").addEventListener("click", async () => {
-  const title = prompt("Room name?", "");
-  if (!title || !title.trim()) return;
+  const choice = await showCreateRoomModal();
+  if (!choice) return;
   try {
-    const r = await api("POST", "/api/rooms", { title: title.trim() });
+    const r = await api("POST", "/api/rooms", { title: choice.title, visibility: choice.visibility });
     await roomsRefreshList();
     await roomsOpen(r.room.id);
   } catch (e) { alert(e.message); }
 });
 
-$("#rooms-members-btn").addEventListener("click", () => {
-  Rooms.membersOpen = !Rooms.membersOpen;
-  $("#rooms-members-panel").classList.toggle("hidden", !Rooms.membersOpen);
+function showCreateRoomModal() {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal";
+    overlay.innerHTML = `
+      <div class="modal-card modal-card--sm">
+        <div class="modal-header">
+          <h2>New room</h2>
+          <button type="button" data-act="close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="add-row">
+            <div class="add-row-label">Name</div>
+            <input type="text" id="cr-title" class="api-key-input" placeholder="room name" />
+          </div>
+          <div class="add-row">
+            <div class="add-row-label">Visibility</div>
+            <div class="chip-group" data-group="vis">
+              <button type="button" class="chip active" data-val="private">
+                <span class="chip-title">🔒 Private</span>
+                <span class="chip-sub">invite-only by link</span>
+              </button>
+              <button type="button" class="chip" data-val="public">
+                <span class="chip-title">🌐 Public</span>
+                <span class="chip-sub">discoverable; anyone can request</span>
+              </button>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" data-act="close">Cancel</button>
+            <button type="button" class="btn-primary" data-act="ok">Create</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    let vis = "private";
+    overlay.querySelector("#cr-title").focus();
+    overlay.addEventListener("click", (ev) => {
+      const t = ev.target.closest("[data-act], .chip");
+      if (!t) { if (ev.target === overlay) { overlay.remove(); resolve(null); } return; }
+      if (t.classList.contains("chip")) {
+        vis = t.dataset.val;
+        overlay.querySelectorAll('[data-group="vis"] .chip').forEach(c => c.classList.toggle("active", c.dataset.val === vis));
+        return;
+      }
+      if (t.dataset.act === "close") { overlay.remove(); resolve(null); return; }
+      if (t.dataset.act === "ok") {
+        const title = (overlay.querySelector("#cr-title").value || "").trim();
+        if (!title) { overlay.querySelector("#cr-title").focus(); return; }
+        overlay.remove();
+        resolve({ title, visibility: vis });
+      }
+    });
+    document.addEventListener("keydown", function onKey(ev) {
+      if (!document.body.contains(overlay)) { document.removeEventListener("keydown", onKey); return; }
+      if (ev.key === "Escape") { overlay.remove(); resolve(null); document.removeEventListener("keydown", onKey); }
+      if (ev.key === "Enter" && ev.target.id === "cr-title") {
+        overlay.querySelector('[data-act="ok"]').click();
+      }
+    });
+  });
+}
+
+$("#rooms-visibility-btn")?.addEventListener("click", async () => {
+  if (!Rooms.current || !Rooms.current.is_owner) return;
+  const next = Rooms.current.visibility === "public" ? "private" : "public";
+  const msg = next === "public"
+    ? "Make this room public? Anyone will be able to find it in Discover and request to join."
+    : "Make this room private? It will no longer appear in Discover; only people with the link can request to join.";
+  if (!confirm(msg)) return;
+  try {
+    await api("PATCH", `/api/rooms/${Rooms.current.id}`, { visibility: next });
+    await roomsReloadCurrent();
+  } catch (e) { alert(e.message); }
 });
+
+$("#rooms-discover-btn")?.addEventListener("click", () => openDiscoverView());
+
+async function openDiscoverView() {
+  $("#rooms-detail-empty").classList.add("hidden");
+  $("#rooms-detail").classList.add("hidden");
+  const view = $("#rooms-discover-view");
+  view.classList.remove("hidden");
+  view.innerHTML = `<div class="rooms-empty">Loading public rooms…</div>`;
+  try {
+    const r = await api("GET", "/api/rooms/discover");
+    const rooms = r.rooms || [];
+    if (!rooms.length) {
+      view.innerHTML = `<div class="rooms-empty">No public rooms yet. Create one and mark it 🌐 public to let others find it.</div>`;
+      return;
+    }
+    view.innerHTML = `
+      <div class="discover-header"><strong>Public rooms</strong></div>
+      <div class="discover-list">
+        ${rooms.map(rm => {
+          const memberLine = rm.my_status === "approved" ? "✓ joined"
+                           : rm.my_status === "pending"  ? "… pending"
+                           : rm.my_status === "rejected" ? "✕ rejected"
+                           : "";
+          return `<div class="discover-card" data-rid="${rm.id}">
+            <div class="discover-card-main">
+              <div class="discover-title">${escapeHtml(rm.title)}</div>
+              <div class="discover-meta">${rm.member_count} member(s) · 🌐 public ${memberLine ? "· " + memberLine : ""}</div>
+            </div>
+            <div class="discover-actions">
+              ${rm.my_status === "approved"
+                ? `<button class="btn-primary" data-act="open">Open</button>`
+                : `<button class="btn-primary" data-act="join">${rm.my_status === "pending" ? "Re-add agent" : "Request to join"}</button>`}
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+    `;
+    view.querySelectorAll(".discover-card").forEach(card => {
+      card.querySelector('[data-act="open"]')?.addEventListener("click", async () => {
+        view.classList.add("hidden");
+        await roomsOpen(card.dataset.rid);
+        await roomsRefreshList();
+      });
+      card.querySelector('[data-act="join"]')?.addEventListener("click", async () => {
+        const choice = await showJoinPublicRoomModal();
+        if (!choice) return;
+        try {
+          await api("POST", `/api/rooms/${card.dataset.rid}/join`, choice);
+          alert(choice.kind === "user" ? "Request sent — waiting for owner approval." : "Agent request sent — waiting for owner approval.");
+          openDiscoverView();
+        } catch (e) { alert(e.message); }
+      });
+    });
+  } catch (e) {
+    view.innerHTML = `<div class="rooms-empty">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function showJoinPublicRoomModal() {
+  // Choose: join as user, or send one of my runners. Reuse the add-member chip UI.
+  let backends = [];
+  try {
+    const bs = await api("GET", "/api/backends");
+    backends = (bs.backends || bs).map(b => b.name || b);
+  } catch {}
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal";
+    let pickedSubject = "__self__";
+    let pickedMode = "passive";
+    overlay.innerHTML = `
+      <div class="modal-card modal-card--sm">
+        <div class="modal-header">
+          <h2>Request to join</h2>
+          <button type="button" data-act="close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="add-row">
+            <div class="add-row-label">Who</div>
+            <div class="chip-group" data-group="subject"></div>
+          </div>
+          <div class="add-row" data-row="mode">
+            <div class="add-row-label">Mode</div>
+            <div class="chip-group" data-group="mode">
+              <button type="button" class="chip active" data-val="passive">
+                <span class="chip-title">Passive</span><span class="chip-sub">only when asked</span>
+              </button>
+              <button type="button" class="chip" data-val="active">
+                <span class="chip-title">Active</span><span class="chip-sub">chimes in freely</span>
+              </button>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" data-act="close">Cancel</button>
+            <button type="button" class="btn-primary" data-act="ok">Send request</button>
+          </div>
+        </div>
+      </div>`;
+    const subj = overlay.querySelector('[data-group="subject"]');
+    const me = document.createElement("button");
+    me.type = "button"; me.className = "chip active";
+    me.dataset.val = "__self__";
+    me.innerHTML = `<span class="chip-title">👤 Myself</span>`;
+    subj.appendChild(me);
+    for (const n of backends) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "chip";
+      b.dataset.val = n;
+      b.innerHTML = `<span class="chip-title">🤖 ${escapeHtml(n)}</span>`;
+      subj.appendChild(b);
+    }
+    function sync() {
+      overlay.querySelectorAll('[data-group="subject"] .chip').forEach(c => c.classList.toggle("active", c.dataset.val === pickedSubject));
+      overlay.querySelectorAll('[data-group="mode"] .chip').forEach(c => c.classList.toggle("active", c.dataset.val === pickedMode));
+      overlay.querySelector('[data-row="mode"]').style.display = pickedSubject === "__self__" ? "none" : "";
+    }
+    sync();
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (ev) => {
+      const t = ev.target.closest("[data-act], .chip");
+      if (!t) { if (ev.target === overlay) { overlay.remove(); resolve(null); } return; }
+      if (t.classList.contains("chip")) {
+        const g = t.parentElement.dataset.group;
+        if (g === "subject") pickedSubject = t.dataset.val;
+        else pickedMode = t.dataset.val;
+        sync(); return;
+      }
+      if (t.dataset.act === "close") { overlay.remove(); resolve(null); return; }
+      if (t.dataset.act === "ok") {
+        const isSelf = pickedSubject === "__self__";
+        overlay.remove();
+        resolve({ kind: isSelf ? "user" : "runner", backend_name: isSelf ? "" : pickedSubject, mode: isSelf ? "passive" : pickedMode });
+      }
+    });
+  });
+}
 
 $("#rooms-pause-btn").addEventListener("click", async () => {
   if (!Rooms.current) return;

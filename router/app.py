@@ -317,6 +317,8 @@ def db_init() -> None:
                 owner_user_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 paused INTEGER NOT NULL DEFAULT 0,
+                visibility TEXT NOT NULL DEFAULT 'private'
+                    CHECK(visibility IN ('private','public')),
                 FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS room_members (
@@ -326,6 +328,8 @@ def db_init() -> None:
                 backend_name TEXT NOT NULL DEFAULT '',
                 mode TEXT NOT NULL DEFAULT 'passive' CHECK(mode IN ('passive','active')),
                 status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+                role TEXT NOT NULL DEFAULT 'member'
+                    CHECK(role IN ('owner','admin','member')),
                 invited_by_user_id TEXT,
                 approved_by_user_id TEXT,
                 created_at INTEGER NOT NULL,
@@ -375,6 +379,31 @@ def db_init() -> None:
                 SELECT user_id, '', env_var, value, updated_at FROM user_env_overrides;
                 DROP TABLE user_env_overrides;
                 ALTER TABLE user_env_overrides_new RENAME TO user_env_overrides;
+                """
+            )
+
+        # rooms.visibility (default 'private') — added 2026-05
+        room_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()}
+        if room_cols and "visibility" not in room_cols:
+            log.info("migrating rooms: adding visibility column")
+            conn.execute(
+                "ALTER TABLE rooms ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'"
+            )
+
+        # room_members.role ('owner'|'admin'|'member') — added 2026-05
+        rm_cols = {r["name"] for r in conn.execute("PRAGMA table_info(room_members)").fetchall()}
+        if rm_cols and "role" not in rm_cols:
+            log.info("migrating room_members: adding role column + backfilling owner role")
+            conn.execute(
+                "ALTER TABLE room_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'"
+            )
+            # backfill: the user-kind row that matches rooms.owner_user_id becomes 'owner'
+            conn.execute(
+                """
+                UPDATE room_members
+                   SET role = 'owner'
+                 WHERE kind = 'user'
+                   AND user_id = (SELECT owner_user_id FROM rooms WHERE rooms.id = room_members.room_id)
                 """
             )
 
@@ -2382,6 +2411,12 @@ async def _run_one_runner_turn(
 
 class RoomCreateBody(BaseModel):
     title: str
+    visibility: str = "private"  # 'private' | 'public'
+
+
+class RoomPatchBody(BaseModel):
+    title: str | None = None
+    visibility: str | None = None  # 'private' | 'public'
 
 
 class RoomJoinBody(BaseModel):
@@ -2395,6 +2430,8 @@ class RoomMessageBody(BaseModel):
 
 
 def _room_owner_check(conn: sqlite3.Connection, room_id: str, user: dict[str, Any]) -> dict[str, Any]:
+    """Strict owner check (or global admin). For destructive room-level
+    actions: delete, pause, change visibility, promote/demote admins."""
     row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="room not found")
@@ -2402,6 +2439,27 @@ def _room_owner_check(conn: sqlite3.Connection, room_id: str, user: dict[str, An
     is_admin = user.get("role") == "admin"
     if not (is_owner or is_admin):
         raise HTTPException(status_code=403, detail="owner or admin only")
+    return dict(row)
+
+
+def _room_admin_check(conn: sqlite3.Connection, room_id: str, user: dict[str, Any]) -> dict[str, Any]:
+    """Loose check: owner, room-admin (role='admin' in this room), or global admin.
+    Used for member moderation (approve/reject/remove)."""
+    row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="room not found")
+    if user.get("role") == "admin" or row["owner_user_id"] == user["id"]:
+        return dict(row)
+    mod = conn.execute(
+        """
+        SELECT 1 FROM room_members
+         WHERE room_id = ? AND kind='user' AND user_id = ?
+           AND status = 'approved' AND role IN ('owner','admin')
+        """,
+        (room_id, user["id"]),
+    ).fetchone()
+    if not mod:
+        raise HTTPException(status_code=403, detail="moderator only")
     return dict(row)
 
 
@@ -2448,23 +2506,77 @@ def api_create_room(body: RoomCreateBody, user: dict[str, Any] = Depends(current
     title = body.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="title required")
+    visibility = (body.visibility or "private").strip().lower()
+    if visibility not in ("private", "public"):
+        raise HTTPException(status_code=400, detail="visibility must be private|public")
     room_id = uuid.uuid4().hex
     now = int(time.time())
     with _DB_LOCK, db_connect() as conn:
         conn.execute(
-            "INSERT INTO rooms (id, title, owner_user_id, created_at) VALUES (?, ?, ?, ?)",
-            (room_id, title, user["id"], now),
+            "INSERT INTO rooms (id, title, owner_user_id, created_at, visibility) VALUES (?, ?, ?, ?, ?)",
+            (room_id, title, user["id"], now, visibility),
         )
         conn.execute(
             """
             INSERT INTO room_members
-                (room_id, kind, user_id, backend_name, mode, status,
+                (room_id, kind, user_id, backend_name, mode, status, role,
                  invited_by_user_id, approved_by_user_id, created_at, approved_at)
-            VALUES (?, 'user', ?, '', 'passive', 'approved', ?, ?, ?, ?)
+            VALUES (?, 'user', ?, '', 'passive', 'approved', 'owner', ?, ?, ?, ?)
             """,
             (room_id, user["id"], user["id"], user["id"], now, now),
         )
-    return {"room": {"id": room_id, "title": title, "owner_user_id": user["id"], "created_at": now, "paused": 0}}
+    return {"room": {"id": room_id, "title": title, "owner_user_id": user["id"],
+                     "created_at": now, "paused": 0, "visibility": visibility}}
+
+
+@app.patch("/api/rooms/{room_id}")
+def api_patch_room(
+    room_id: str,
+    body: RoomPatchBody,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Update room metadata. Owner-only (visibility, title)."""
+    updates: list[tuple[str, Any]] = []
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title cannot be empty")
+        updates.append(("title", title))
+    if body.visibility is not None:
+        vis = body.visibility.strip().lower()
+        if vis not in ("private", "public"):
+            raise HTTPException(status_code=400, detail="visibility must be private|public")
+        updates.append(("visibility", vis))
+    if not updates:
+        return {"ok": True}
+    with _DB_LOCK, db_connect() as conn:
+        _room_owner_check(conn, room_id, user)
+        set_clause = ", ".join(f"{c} = ?" for c, _ in updates)
+        params = [v for _, v in updates] + [room_id]
+        conn.execute(f"UPDATE rooms SET {set_clause} WHERE id = ?", params)
+    return {"ok": True}
+
+
+@app.get("/api/rooms/discover")
+def api_discover_rooms(user: dict[str, Any] = Depends(current_user)):
+    """List public rooms (anyone can see; not necessarily a member)."""
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.*,
+                   (SELECT COUNT(*) FROM room_members rm
+                      WHERE rm.room_id = r.id AND rm.status = 'approved') AS member_count,
+                   (SELECT status FROM room_members rm
+                      WHERE rm.room_id = r.id AND rm.kind = 'user'
+                        AND rm.user_id = ? LIMIT 1) AS my_status
+              FROM rooms r
+             WHERE r.visibility = 'public'
+             ORDER BY r.created_at DESC
+             LIMIT 200
+            """,
+            (user["id"],),
+        ).fetchall()
+        return {"rooms": [dict(r) for r in rows]}
 
 
 @app.get("/api/rooms/{room_id}")
@@ -2475,10 +2587,20 @@ def api_get_room(room_id: str, user: dict[str, Any] = Depends(current_user)):
             "SELECT * FROM room_members WHERE room_id = ? ORDER BY created_at",
             (room_id,),
         ).fetchall()
+        is_owner = room["owner_user_id"] == user["id"]
+        my_role = "owner" if is_owner else None
+        if not my_role:
+            for m in members:
+                if m["kind"] == "user" and m["user_id"] == user["id"] and m["status"] == "approved":
+                    my_role = m["role"] or "member"
+                    break
+        is_moderator = is_owner or my_role == "admin" or user.get("role") == "admin"
         return {
             "room": room,
             "members": [dict(m) for m in members],
-            "is_owner": room["owner_user_id"] == user["id"],
+            "is_owner": is_owner,
+            "my_role": my_role,
+            "is_moderator": is_moderator,
         }
 
 
@@ -2551,7 +2673,7 @@ def api_room_approve(
 ):
     now = int(time.time())
     with _DB_LOCK, db_connect() as conn:
-        _room_owner_check(conn, room_id, user)
+        _room_admin_check(conn, room_id, user)
         cur = conn.execute(
             """
             UPDATE room_members
@@ -2575,7 +2697,7 @@ def api_room_reject(
     user: dict[str, Any] = Depends(current_user),
 ):
     with _DB_LOCK, db_connect() as conn:
-        _room_owner_check(conn, room_id, user)
+        _room_admin_check(conn, room_id, user)
         cur = conn.execute(
             """
             UPDATE room_members SET status = 'rejected'
@@ -2598,13 +2720,67 @@ def api_room_remove_member(
     user: dict[str, Any] = Depends(current_user),
 ):
     with _DB_LOCK, db_connect() as conn:
-        room = _room_owner_check(conn, room_id, user)
+        room = _room_admin_check(conn, room_id, user)
         if member_kind == "user" and member_user_id == room["owner_user_id"]:
             raise HTTPException(status_code=400, detail="cannot remove owner")
+        # room-admins cannot remove other admins; only the owner / global admin can.
+        is_owner = room["owner_user_id"] == user["id"] or user.get("role") == "admin"
+        if not is_owner and member_kind == "user":
+            target = conn.execute(
+                "SELECT role FROM room_members WHERE room_id=? AND kind='user' AND user_id=? AND backend_name=''",
+                (room_id, member_user_id),
+            ).fetchone()
+            if target and target["role"] == "admin":
+                raise HTTPException(status_code=403, detail="only owner can remove an admin")
         conn.execute(
             "DELETE FROM room_members WHERE room_id = ? AND kind = ? AND user_id = ? AND backend_name = ?",
             (room_id, member_kind, member_user_id, backend_name),
         )
+    return {"ok": True}
+
+
+@app.post("/api/rooms/{room_id}/members/promote")
+def api_room_promote(
+    room_id: str,
+    member_user_id: str,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Promote an approved user-member to room admin. Owner-only."""
+    with _DB_LOCK, db_connect() as conn:
+        room = _room_owner_check(conn, room_id, user)
+        if member_user_id == room["owner_user_id"]:
+            raise HTTPException(status_code=400, detail="owner already has all rights")
+        cur = conn.execute(
+            """
+            UPDATE room_members SET role = 'admin'
+             WHERE room_id = ? AND kind = 'user' AND user_id = ?
+               AND status = 'approved' AND role = 'member'
+            """,
+            (room_id, member_user_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="approved user-member not found")
+    return {"ok": True}
+
+
+@app.post("/api/rooms/{room_id}/members/demote")
+def api_room_demote(
+    room_id: str,
+    member_user_id: str,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Demote a room admin back to plain member. Owner-only."""
+    with _DB_LOCK, db_connect() as conn:
+        _room_owner_check(conn, room_id, user)
+        cur = conn.execute(
+            """
+            UPDATE room_members SET role = 'member'
+             WHERE room_id = ? AND kind = 'user' AND user_id = ? AND role = 'admin'
+            """,
+            (room_id, member_user_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="room admin not found")
     return {"ok": True}
 
 

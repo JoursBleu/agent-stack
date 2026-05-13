@@ -135,6 +135,7 @@
     <div class="modal-header">
       <h2>Rooms</h2>
       <div class="rooms-header-actions">
+        <button id="rooms-discover-btn" class="btn-ghost">Discover</button>
         <button id="rooms-new-btn" class="btn-primary">+ New room</button>
         <button id="rooms-close">×</button>
       </div>
@@ -145,6 +146,7 @@
       </aside>
       <section class="rooms-detail-pane">
         <div id="rooms-detail-empty" class="rooms-empty">Select or create a room.</div>
+        <div id="rooms-discover-view" class="rooms-discover hidden"></div>
         <div id="rooms-detail" class="hidden">
           <header class="rooms-detail-header">
             <div>
@@ -152,12 +154,12 @@
               <div id="rooms-detail-meta" class="rooms-meta"></div>
             </div>
             <div class="rooms-detail-actions">
-              <button id="rooms-members-btn" class="btn-ghost">Members</button>
+              <button id="rooms-visibility-btn" class="btn-ghost" title="Toggle visibility (owner only)"></button>
               <button id="rooms-pause-btn" class="btn-ghost">Pause</button>
               <button id="rooms-leave-btn" class="btn-ghost">Delete</button>
             </div>
           </header>
-          <div id="rooms-members-panel" class="rooms-members hidden"></div>
+          <div id="rooms-members-panel" class="rooms-members"></div>
           <div id="rooms-messages" class="rooms-messages"></div>
           <form id="rooms-composer" class="rooms-composer">
             <textarea id="rooms-composer-input" rows="2" placeholder="Send a message… use @bob/hermes to mention an agent"></textarea>
