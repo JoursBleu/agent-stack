@@ -2,7 +2,7 @@
 
 > Multi-tenant, multi-backend agent runtime exposing an OpenAI-compatible
 > HTTP surface aggregated across several agent runtimes (OpenClaw,
-> Hermes Agent, …).
+> Hermes Agent, HKUDS nanobot, …).
 
 A lightweight alternative to "OpenWebUI + many sidecar containers": one
 router, one tiny SPA, per-user Docker-spawned agent runtimes that auto-stop
@@ -53,12 +53,11 @@ browser
                                          │
                   ┌──────────────────────┴──────────────────────┐
                   ▼                                              ▼
-       openclaw-with-chromium                            nousresearch/hermes
-       agstack-openclaw-<slug>                          agstack-hermes-<slug>
-       (per-user OPENCLAW_HOME at                       (per-user HERMES_HOME at
-        /data/users/<slug>/openclaw)                     /data/users/<slug>/hermes-agent)
-                  │                                              │
-                  └──────────────► OpenAI-compatible upstream ◄──┘
+       openclaw-with-chromium    nousresearch/hermes        agstack/nanobot-hkuds
+       agstack-openclaw-<slug>   agstack-hermes-<slug>      agstack-nanobot-<slug>
+       (~/.openclaw)             (/opt/data)                (~/.nanobot)
+                  │                       │                          │
+                  └────────────► OpenAI-compatible upstream ◄────────┘
                                        (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL,
                                         admin sets in web UI; per-user
                                         override allowed)
@@ -80,6 +79,7 @@ agent-stack/
     openclaw-home/           copied into each user's openclaw home on first start
       openclaw.json          enables /v1/chat/completions; ${LLM_*} substituted
     hermes-home/             hermes config.yaml + .env, templated per user
+    nanobot-home/            HKUDS nanobot config.json, templated per user
   images/
     openclaw/                optional thin overlay over upstream openclaw image
       Dockerfile             adds chromium + CJK fonts + (optional) proxy wrapper
@@ -117,13 +117,16 @@ $EDITOR .env  # set BOOTSTRAP_ADMIN_EMAIL / _PASSWORD; HOST_STACK_ROOT
 DATA=$(grep ^HOST_STACK_ROOT .env | cut -d= -f2)
 sudo mkdir -p "$DATA" && sudo chown $USER "$DATA"
 
-# 3. Pull the OpenClaw backend image. docker compose only builds router
+# 3. Pull the backend images. docker compose only builds router
 #    and frontend — it does NOT auto-pull backend images, so you must
-#    do this once. The image lives on GHCR (it is NOT mirrored to
+#    do this once. OpenClaw lives on GHCR (it is NOT mirrored to
 #    Docker Hub; `docker pull openclaw/openclaw` would 404).
 docker pull ghcr.io/openclaw/openclaw:latest
+docker pull nousresearch/hermes-agent:latest
 # Or build the desktop-Chromium overlay shipped in this repo:
 #   cd images/openclaw && docker build -t openclaw-with-chromium:latest .
+# nanobot has no published image; build it locally from HKUDS PyPI:
+#   docker build -t agstack/nanobot-hkuds:0.1.5.post3 images/nanobot/
 
 # 4. Build + start router and frontend.
 docker compose up -d --build

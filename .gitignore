@@ -17,6 +17,8 @@ users/
 images/*
 !images/openclaw/
 !images/openclaw/**
+!images/nanobot/
+!images/nanobot/**
 *.tar
 *.tar.gz
 
