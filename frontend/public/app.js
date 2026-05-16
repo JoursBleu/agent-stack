@@ -65,6 +65,12 @@ const I18N = {
     "settings.language": "Language",
     "settings.api_keys_title": "Backend API keys",
     "settings.api_keys_hint": "Leave a field empty to use the shared default key. Saving a key restarts your runner so the new value takes effect on the next chat.",
+    "settings.idle_title": "Idle release per backend",
+    "settings.idle_hint": "Containers are stopped after this many seconds of inactivity (60 – 21600). Saved per backend, per user.",
+    "settings.idle_unit": "seconds",
+    "settings.idle_save": "Save",
+    "settings.idle_saved": "Saved",
+    "settings.idle_save_failed": "Save failed: ",
     "settings.api_keys_placeholder_unset": "using shared default",
     "settings.api_keys_placeholder_set": "override saved (enter a new value to replace, or clear to remove)",
     "settings.api_keys_save": "Save",
@@ -189,6 +195,12 @@ const I18N = {
     "settings.language": "语言",
     "settings.api_keys_title": "后端 API 密钥",
     "settings.api_keys_hint": "留空表示使用共享默认 key。保存后会重启你的 runner，新 key 在下次对话生效。",
+    "settings.idle_title": "各后端 idle 释放时间",
+    "settings.idle_hint": "容器在指定秒数未活动后会被回收（60 – 21600）。按 backend 单独保存。",
+    "settings.idle_unit": "秒",
+    "settings.idle_save": "保存",
+    "settings.idle_saved": "已保存",
+    "settings.idle_save_failed": "保存失败：",
     "settings.api_keys_placeholder_unset": "使用共享默认 key",
     "settings.api_keys_placeholder_set": "已保存自定义 key（输入新值替换，或留空清除）",
     "settings.api_keys_save": "保存",
@@ -300,6 +312,7 @@ function applyI18n() {
   const settingsModal = document.getElementById("app-settings-modal");
   if (settingsModal && !settingsModal.classList.contains("hidden")) {
     renderApiKeysSection();
+    renderIdleSection();
   }
 }
 
@@ -1187,6 +1200,56 @@ function openAppSettings() {
   $("#setting-lang").value  = getLang();
   $("#app-settings-modal").classList.remove("hidden");
   renderApiKeysSection();
+  renderIdleSection();
+}
+
+async function renderIdleSection() {
+  const wrap = $("#setting-idle-list");
+  if (!wrap) return;
+  let backends;
+  try {
+    const r = await api("GET", "/api/backends");
+    backends = r.backends || [];
+  } catch (e) {
+    wrap.innerHTML = `<div class="setting-row"><span>${escapeHtml(e.message)}</span></div>`;
+    return;
+  }
+  if (!backends.length) { wrap.innerHTML = ""; return; }
+  wrap.innerHTML = backends.map(b => `
+    <div class="setting-row idle-row" data-backend="${escapeHtml(b.name)}">
+      <label>${escapeHtml(b.display_name || b.name)}</label>
+      <span class="idle-controls">
+        <input type="number" min="60" max="21600" step="60"
+               class="idle-modal-input"
+               value="${b.idle_seconds}"
+               data-default="${b.default_idle_seconds}" />
+        <span class="setting-hint">${escapeHtml(t("settings.idle_unit"))}</span>
+        <button class="idle-modal-save" data-backend="${escapeHtml(b.name)}">${escapeHtml(t("settings.idle_save"))}</button>
+        <span class="idle-modal-status" aria-live="polite"></span>
+      </span>
+    </div>
+  `).join("");
+  wrap.querySelectorAll(".idle-modal-save").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const backend = btn.dataset.backend;
+      const row = wrap.querySelector(`.idle-row[data-backend="${backend}"]`);
+      const input = row.querySelector(".idle-modal-input");
+      const status = row.querySelector(".idle-modal-status");
+      const v = Math.max(60, Math.min(21600, parseInt(input.value, 10) || 0));
+      input.value = v;
+      btn.disabled = true;
+      status.textContent = "…";
+      try {
+        await api("PUT", `/api/runners/${backend}/idle`, { idle_seconds: v });
+        status.textContent = t("settings.idle_saved");
+        setTimeout(() => { status.textContent = ""; }, 2000);
+      } catch (e) {
+        status.textContent = t("settings.idle_save_failed") + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 }
 function closeAppSettings() {
   $("#app-settings-modal").classList.add("hidden");

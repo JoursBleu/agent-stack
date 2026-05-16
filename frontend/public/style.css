@@ -595,3 +595,7 @@ input, textarea, select { font: inherit; }
 .rooms-discover .discover-title { font-size: 14px; font-weight: 600; color: var(--text-strong); }
 .rooms-discover .discover-meta  { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 .rooms-discover .discover-actions button { font-size: 12px; padding: 6px 12px; }
+
+.idle-row .idle-controls { display: inline-flex; align-items: center; gap: 6px; }
+.idle-row .idle-modal-input { width: 80px; }
+.idle-row .idle-modal-status { font-size: 11px; color: var(--text-faint); min-width: 60px; }

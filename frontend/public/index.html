@@ -121,6 +121,11 @@
         </select>
       </div>
       <div class="setting-section">
+        <h3 data-i18n="settings.idle_title">Idle release per backend</h3>
+        <p class="setting-hint" data-i18n="settings.idle_hint">Containers are stopped after this many seconds of inactivity (60 – 21600). Saved per backend, per user.</p>
+        <div id="setting-idle-list"></div>
+      </div>
+      <div class="setting-section">
         <h3 data-i18n="settings.api_keys_title">Backend API keys</h3>
         <p class="setting-hint" data-i18n="settings.api_keys_hint">Leave a field empty to use the shared default key. Saving a key restarts your runner so the new value takes effect on next chat.</p>
         <div id="setting-api-keys"></div>
