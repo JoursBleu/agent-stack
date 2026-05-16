@@ -794,6 +794,15 @@ async function selectChat(id, opts) {
 }
 
 function renderMessages(chat) {
+  // Only the currently-active chat owns the message pane. Streaming replies on
+  // background chats must NOT touch the DOM, otherwise switching away from a
+  // chat while its reply is still arriving makes the visible chat flicker as
+  // the other chat's deltas keep overwriting #messages.
+  if (!chat || chat.id !== State.activeChatId) {
+    // Still bump the sidebar so the user can see the other chat advance.
+    renderChatList();
+    return;
+  }
   const root = $("#messages");
   root.innerHTML = "";
   const backendDef = State.backends.find(b => b.name === chat.backend);
