@@ -110,6 +110,8 @@ const I18N = {
     "sidebar.pause": "Pause",
     "sidebar.start": "Start",
     "sidebar.delete_chat": "Delete chat",
+    "sidebar.rename_chat": "Rename chat",
+    "chat.rename_prompt": "New name for this chat:",
     "backend_settings.save_idle": "Save idle",
     "backend_settings.action_failed": "Action failed: ",
 
@@ -230,6 +232,8 @@ const I18N = {
     "sidebar.pause": "暂停",
     "sidebar.start": "启动",
     "sidebar.delete_chat": "删除会话",
+    "sidebar.rename_chat": "重命名会话",
+    "chat.rename_prompt": "输入新的会话名称：",
     "backend_settings.save_idle": "保存 idle",
     "backend_settings.action_failed": "操作失败：",
 
@@ -398,6 +402,86 @@ $("#auth-form").addEventListener("submit", async (ev) => {
 });
 
 // ============================================================
+// Client-side chat router
+// ============================================================
+//
+// Each chat owns a permalink of the form `/<user-slug>/<backend>/chat_<seq>`,
+// where `seq` is the 1-based rank of the chat within (user, backend) ordered
+// by creation time (assigned server-side). nginx is configured with
+// `try_files $uri /index.html` so any non-API path serves the SPA, which then
+// resolves the path here.
+
+function chatUrlFor(chat) {
+  if (!chat) return "/";
+  const slug = State.user && State.user.slug;
+  if (!slug || !chat.backend || !chat.seq) return "/";
+  return `/${encodeURIComponent(slug)}/${encodeURIComponent(chat.backend)}/chat_${chat.seq}`;
+}
+
+function syncChatUrl(chat) {
+  const url = chatUrlFor(chat);
+  if (!url) return;
+  if (window.location.pathname === url) return;
+  try { history.pushState({ chatId: chat ? chat.id : null }, "", url); } catch {}
+}
+
+function parseChatPath(pathname) {
+  // Match /<slug>/<backend>/chat_<seq>
+  const m = pathname.match(/^\/([^/]+)\/([^/]+)\/chat_(\d+)\/?$/);
+  if (!m) return null;
+  return {
+    slug:    decodeURIComponent(m[1]),
+    backend: decodeURIComponent(m[2]),
+    seq:     parseInt(m[3], 10),
+  };
+}
+
+async function routeFromLocation() {
+  const parsed = parseChatPath(window.location.pathname);
+  if (!parsed) return false;
+  // Only honor URLs that match the signed-in user's slug; if a different
+  // slug is in the URL we ignore it and fall back to the default chat.
+  if (!State.user || parsed.slug !== State.user.slug) return false;
+  let chat = State.chats.find(c =>
+    c.backend === parsed.backend && c.seq === parsed.seq
+  );
+  if (!chat) {
+    // Not in our cached list — try resolving via the by-slug endpoint.
+    // This handles deep links to a chat that for some reason isn't in
+    // `State.chats` yet (e.g. fresh tab, but chat list trimmed elsewhere).
+    try {
+      const r = await api(
+        "GET",
+        `/api/conversations/by-slug/${encodeURIComponent(parsed.backend)}/${parsed.seq}`,
+      );
+      const c = r.conversation;
+      if (c) {
+        chat = {
+          id: c.id, backend: c.backend, model: c.model,
+          seq: c.seq || parsed.seq,
+          title: c.title || "",
+          messages: (r.messages || []).map(m => ({ id: m.id, role: m.role, content: m.content })),
+          messageCount: (r.messages || []).length,
+          updated_at: c.updated_at * 1000,
+          loaded: true,
+        };
+        State.chats.unshift(chat);
+        State.expandedBackends.add(chat.backend);
+      }
+    } catch {}
+  }
+  if (!chat) return false;
+  await selectChat(chat.id, { pushUrl: false });
+  return true;
+}
+
+function installChatRouter() {
+  if (window.__agstackRouterInstalled) return;
+  window.__agstackRouterInstalled = true;
+  window.addEventListener("popstate", () => { routeFromLocation(); });
+}
+
+// ============================================================
 // App lifecycle
 // ============================================================
 
@@ -410,7 +494,9 @@ async function enterApp() {
   await refreshBackends();
   await refreshRunners();
   applyI18n();
-  if (State.chats.length > 0) selectChat(State.chats[0].id);
+  installChatRouter();
+  const routed = await routeFromLocation();
+  if (!routed && State.chats.length > 0) selectChat(State.chats[0].id);
   setInterval(refreshRunners, 5000);
 }
 
@@ -518,6 +604,7 @@ function renderSidebar() {
               const isActive = c.id === State.activeChatId;
               return `<div class="chat-row${isActive ? " active" : ""}" data-id="${escapeHtml(c.id)}">
                 <div class="title">${escapeHtml(c.title || t("sidebar.new_chat_default_title"))}</div>
+                <button class="chat-rename" data-id="${escapeHtml(c.id)}" title="${escapeHtml(t("sidebar.rename_chat"))}">✎</button>
                 <button class="chat-del" data-id="${escapeHtml(c.id)}" title="${escapeHtml(t("sidebar.delete_chat"))}">×</button>
               </div>`;
             }).join("")}
@@ -566,14 +653,14 @@ function renderSidebar() {
   });
   root.querySelectorAll(".chat-row").forEach(row => {
     row.addEventListener("click", (ev) => {
-      if (ev.target.classList.contains("chat-del")) return;
+      if (ev.target.classList.contains("chat-del") || ev.target.classList.contains("chat-rename")) return;
       // "+ New chat" rows have no data-id; route to createChat instead
       if (row.classList.contains("new-chat-row")) {
         const backend = State.backends.find(x => x.name === row.dataset.backend);
         if (backend) createChat(backend, row.dataset.model);
         return;
       }
-      selectChat(row.dataset.id);
+      selectChat(row.dataset.id, { pushUrl: true });
     });
   });
   root.querySelectorAll(".chat-del").forEach(b => {
@@ -591,10 +678,36 @@ function renderSidebar() {
         $("#chat-meta").textContent = "";
         $("#composer-input").disabled = true;
         $("#composer-send").disabled = true;
+        try { history.pushState({}, "", "/"); } catch {}
       }
       renderSidebar();
     });
   });
+  root.querySelectorAll(".chat-rename").forEach(b => {
+    b.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      promptRenameChat(b.dataset.id);
+    });
+  });
+}
+
+async function promptRenameChat(id) {
+  const chat = State.chats.find(c => c.id === id);
+  if (!chat) return;
+  const current = chat.title || t("sidebar.new_chat_default_title");
+  const next = window.prompt(t("chat.rename_prompt"), current);
+  if (next === null) return;
+  const title = next.trim();
+  if (!title || title === chat.title) return;
+  try {
+    const r = await api("PATCH", `/api/conversations/${id}`, { title });
+    chat.title = r.conversation.title || title;
+    chat.updated_at = (r.conversation.updated_at || Date.now() / 1000) * 1000;
+  } catch (e) { alert(e.message); return; }
+  if (State.activeChatId === id) {
+    $("#chat-title").textContent = chat.title || t("sidebar.new_chat_default_title");
+  }
+  renderSidebar();
 }
 
 // Backwards-compat shims so existing call sites still work.
@@ -622,6 +735,7 @@ async function loadChats() {
     const r = await api("GET", "/api/conversations");
     State.chats = (r.conversations || []).map(c => ({
       id: c.id, backend: c.backend, model: c.model,
+      seq: c.seq || null,
       title: c.title || "",
       messages: [],
       messageCount: c.message_count || 0,
@@ -633,11 +747,12 @@ async function loadChats() {
   } catch { State.chats = []; }
 }
 
-async function selectChat(id) {
+async function selectChat(id, opts) {
   State.activeChatId = id;
   const chat = State.chats.find(c => c.id === id);
   renderChatList();
   if (!chat) { $("#model-picker").classList.add("hidden"); return; }
+  if (opts && opts.pushUrl === true) syncChatUrl(chat);
   if (!chat.loaded) {
     try {
       const r = await api("GET", `/api/conversations/${id}`);
@@ -650,6 +765,9 @@ async function selectChat(id) {
     }
   }
   $("#chat-title").textContent = chat.title || t("sidebar.new_chat_default_title");
+  $("#chat-title").title = t("sidebar.rename_chat");
+  $("#chat-title").style.cursor = "pointer";
+  $("#chat-title").onclick = () => promptRenameChat(chat.id);
   $("#chat-meta").textContent = `${chat.model || chat.backend} \u00b7 ${t("chat.message_count", {n: chat.messages.length})}`;
   renderMessages(chat);
   $("#composer-input").disabled = false;
@@ -857,13 +975,14 @@ async function createChat(backend, modelId) {
   const c = r.conversation;
   State.chats.unshift({
     id: c.id, backend: c.backend, model: c.model,
+    seq: c.seq || null,
     title: c.title || "",
     messages: [],
     messageCount: 0,
     updated_at: c.updated_at * 1000,
     loaded: true,
   });
-  selectChat(c.id);
+  selectChat(c.id, { pushUrl: false });
 }
 
 // ============================================================

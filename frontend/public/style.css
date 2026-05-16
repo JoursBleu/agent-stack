@@ -192,6 +192,10 @@ input, textarea, select { font: inherit; }
 .backend-body .chat-row .chat-del { position: absolute; right: 4px; top: 4px; background: transparent; border: none; color: var(--text-faint); cursor: pointer; font-size: 13px; padding: 0 4px; line-height: 1; display: none; border-radius: 4px; }
 .backend-body .chat-row:hover .chat-del { display: block; }
 .backend-body .chat-row .chat-del:hover { color: var(--danger); background: var(--bg-elev3); }
+.backend-body .chat-row .chat-rename { position: absolute; right: 22px; top: 4px; background: transparent; border: none; color: var(--text-faint); cursor: pointer; font-size: 12px; padding: 0 4px; line-height: 1; display: none; border-radius: 4px; }
+.backend-body .chat-row:hover .chat-rename { display: block; }
+.backend-body .chat-row .chat-rename:hover { color: var(--accent, #4a8cf0); background: var(--bg-elev3); }
+.backend-body .chat-row .title { padding-right: 38px; }
 .backend-body .chat-row.new-chat-row { color: var(--accent, #4a8cf0); }
 .backend-body .chat-row.new-chat-row .title { color: var(--accent, #4a8cf0); font-weight: 500; }
 .backend-body .releases-meta { font-size: 11px; color: var(--text-muted); padding: 6px 4px 0; }

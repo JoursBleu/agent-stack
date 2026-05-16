@@ -1887,7 +1887,11 @@ class MessageAppend(BaseModel):
     content: str
 
 
-def _conversation_row(conv: sqlite3.Row, msg_count: int | None = None) -> dict[str, Any]:
+def _conversation_row(
+    conv: sqlite3.Row,
+    msg_count: int | None = None,
+    seq: int | None = None,
+) -> dict[str, Any]:
     out = {
         "id": conv["id"],
         "backend": conv["backend"],
@@ -1898,7 +1902,27 @@ def _conversation_row(conv: sqlite3.Row, msg_count: int | None = None) -> dict[s
     }
     if msg_count is not None:
         out["message_count"] = msg_count
+    if seq is None:
+        seq = _conversation_seq(conv["user_id"], conv["backend"], conv["id"])
+    if seq is not None:
+        out["seq"] = seq
     return out
+
+
+def _conversation_seq(user_id: str, backend: str, conv_id: str) -> int | None:
+    """Return 1-based rank of conv within (user_id, backend) ordered by created_at."""
+    with db_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT seq FROM (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS seq
+                FROM conversations
+                WHERE user_id = ? AND backend = ?
+            ) WHERE id = ?
+            """,
+            (user_id, backend, conv_id),
+        ).fetchone()
+    return int(row["seq"]) if row else None
 
 
 def _message_row(m: sqlite3.Row) -> dict[str, Any]:
@@ -1926,9 +1950,9 @@ def list_conversations(user: dict[str, Any] = Depends(current_user)):
     with db_connect() as conn:
         rows = conn.execute(
             """
-            SELECT c.*, (
-                SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id
-            ) AS msg_count
+            SELECT c.*,
+                (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count,
+                ROW_NUMBER() OVER (PARTITION BY c.backend ORDER BY c.created_at, c.id) AS seq
             FROM conversations c
             WHERE c.user_id = ?
             ORDER BY c.updated_at DESC
@@ -1936,8 +1960,37 @@ def list_conversations(user: dict[str, Any] = Depends(current_user)):
             (user["id"],),
         ).fetchall()
     return {
-        "conversations": [_conversation_row(r, r["msg_count"]) for r in rows]
+        "conversations": [
+            _conversation_row(r, r["msg_count"], int(r["seq"])) for r in rows
+        ]
     }
+
+
+@app.get("/api/conversations/by-slug/{backend}/{seq}")
+def get_conversation_by_slug(
+    backend: str,
+    seq: int,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Resolve per-user-per-backend sequence number to a conversation.
+
+    Lets the client-side router load /<slug>/<backend>/chat_<N> deep links
+    without first fetching the entire conversation list.
+    """
+    with db_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS seq
+                FROM conversations
+                WHERE user_id = ? AND backend = ?
+            ) WHERE seq = ?
+            """,
+            (user["id"], backend, seq),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return get_conversation(row["id"], user)
 
 
 @app.post("/api/conversations")
