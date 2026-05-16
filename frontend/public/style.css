@@ -599,3 +599,6 @@ input, textarea, select { font: inherit; }
 .idle-row .idle-controls { display: inline-flex; align-items: center; gap: 6px; }
 .idle-row .idle-modal-input { width: 80px; }
 .idle-row .idle-modal-status { font-size: 11px; color: var(--text-faint); min-width: 60px; }
+
+.idle-row .idle-disable-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-faint); cursor: pointer; }
+.idle-row .idle-modal-input[disabled] { opacity: 0.5; }

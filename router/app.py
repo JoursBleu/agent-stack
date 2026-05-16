@@ -710,7 +710,13 @@ class RunnerManager:
             )
 
     def set_idle_seconds(self, user_id: str, backend: str, seconds: int) -> int:
-        seconds = max(MIN_IDLE_SECONDS, min(MAX_IDLE_SECONDS, int(seconds)))
+        seconds = int(seconds)
+        if seconds <= 0:
+            # 0 (or negative) is the "never reap" sentinel — keep the container
+            # running until explicitly stopped via DELETE /api/runners/<backend>.
+            seconds = 0
+        else:
+            seconds = max(MIN_IDLE_SECONDS, min(MAX_IDLE_SECONDS, seconds))
         with _DB_LOCK, db_connect() as conn:
             conn.execute(
                 """
@@ -1119,6 +1125,9 @@ class RunnerManager:
                     log.exception("dead-runner cleanup failed for %s", runner["container_name"])
                 continue
             idle_limit = self.get_idle_seconds(runner["user_id"], runner["backend"])
+            if idle_limit <= 0:
+                # User has disabled the idle reaper for this backend.
+                continue
             if now - int(runner["last_active"]) > idle_limit:
                 log.info(
                     "reaping idle runner user=%s backend=%s idle=%ss limit=%ss",
@@ -1513,6 +1522,7 @@ def api_runners(user: dict[str, Any] = Depends(current_user)):
     for r in runners:
         idle_limit = MANAGER.get_idle_seconds(user["id"], r["backend"])
         idle_for = int(time.time()) - int(r["last_active"])
+        stops_in = None if idle_limit <= 0 else max(0, idle_limit - idle_for)
         out.append({
             "backend": r["backend"],
             "container_name": r["container_name"],
@@ -1521,7 +1531,7 @@ def api_runners(user: dict[str, Any] = Depends(current_user)):
             "last_active": r["last_active"],
             "idle_seconds": idle_limit,
             "idle_for_seconds": idle_for,
-            "stops_in_seconds": max(0, idle_limit - idle_for),
+            "stops_in_seconds": stops_in,
             "running": True,
         })
     return {"runners": out}

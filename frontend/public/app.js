@@ -71,6 +71,8 @@ const I18N = {
     "settings.idle_save": "Save",
     "settings.idle_saved": "Saved",
     "settings.idle_save_failed": "Save failed: ",
+    "settings.idle_disable": "Disable timeout",
+    "settings.idle_disabled_note": "(never auto-stops)",
     "settings.api_keys_placeholder_unset": "using shared default",
     "settings.api_keys_placeholder_set": "override saved (enter a new value to replace, or clear to remove)",
     "settings.api_keys_save": "Save",
@@ -201,6 +203,8 @@ const I18N = {
     "settings.idle_save": "保存",
     "settings.idle_saved": "已保存",
     "settings.idle_save_failed": "保存失败：",
+    "settings.idle_disable": "关闭超时",
+    "settings.idle_disabled_note": "（不会自动停止）",
     "settings.api_keys_placeholder_unset": "使用共享默认 key",
     "settings.api_keys_placeholder_set": "已保存自定义 key（输入新值替换，或留空清除）",
     "settings.api_keys_save": "保存",
@@ -1215,34 +1219,57 @@ async function renderIdleSection() {
     return;
   }
   if (!backends.length) { wrap.innerHTML = ""; return; }
-  wrap.innerHTML = backends.map(b => `
+  wrap.innerHTML = backends.map(b => {
+    const disabled = !b.idle_seconds || b.idle_seconds <= 0;
+    const displayVal = disabled ? (b.default_idle_seconds || 600) : b.idle_seconds;
+    return `
     <div class="setting-row idle-row" data-backend="${escapeHtml(b.name)}">
       <label>${escapeHtml(b.display_name || b.name)}</label>
       <span class="idle-controls">
         <input type="number" min="60" max="21600" step="60"
                class="idle-modal-input"
-               value="${b.idle_seconds}"
+               value="${displayVal}"
+               ${disabled ? "disabled" : ""}
                data-default="${b.default_idle_seconds}" />
         <span class="setting-hint">${escapeHtml(t("settings.idle_unit"))}</span>
+        <label class="idle-disable-toggle">
+          <input type="checkbox" class="idle-modal-disable" ${disabled ? "checked" : ""} />
+          <span>${escapeHtml(t("settings.idle_disable"))}</span>
+        </label>
         <button class="idle-modal-save" data-backend="${escapeHtml(b.name)}">${escapeHtml(t("settings.idle_save"))}</button>
-        <span class="idle-modal-status" aria-live="polite"></span>
+        <span class="idle-modal-status" aria-live="polite">${disabled ? escapeHtml(t("settings.idle_disabled_note")) : ""}</span>
       </span>
     </div>
-  `).join("");
+  `;}).join("");
+  wrap.querySelectorAll(".idle-modal-disable").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const row = cb.closest(".idle-row");
+      const input = row.querySelector(".idle-modal-input");
+      input.disabled = cb.checked;
+    });
+  });
   wrap.querySelectorAll(".idle-modal-save").forEach(btn => {
     btn.addEventListener("click", async () => {
       const backend = btn.dataset.backend;
       const row = wrap.querySelector(`.idle-row[data-backend="${backend}"]`);
       const input = row.querySelector(".idle-modal-input");
       const status = row.querySelector(".idle-modal-status");
-      const v = Math.max(60, Math.min(21600, parseInt(input.value, 10) || 0));
-      input.value = v;
+      const disable = row.querySelector(".idle-modal-disable").checked;
+      let v;
+      if (disable) {
+        v = 0;
+      } else {
+        v = Math.max(60, Math.min(21600, parseInt(input.value, 10) || 0));
+        input.value = v;
+      }
       btn.disabled = true;
       status.textContent = "…";
       try {
         await api("PUT", `/api/runners/${backend}/idle`, { idle_seconds: v });
-        status.textContent = t("settings.idle_saved");
-        setTimeout(() => { status.textContent = ""; }, 2000);
+        status.textContent = disable
+          ? t("settings.idle_disabled_note")
+          : t("settings.idle_saved");
+        if (!disable) setTimeout(() => { status.textContent = ""; }, 2000);
       } catch (e) {
         status.textContent = t("settings.idle_save_failed") + e.message;
       } finally {
