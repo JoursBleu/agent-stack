@@ -2221,10 +2221,9 @@ async def api_delete_agent(
     user: dict[str, Any] = Depends(current_user),
 ):
     row = _get_user_agent(agent_id, user["id"])
-    # stop & remove the underlying runner (if any) — legacy path until step 2
-    # rekeys the manager.
+    # stop & remove the underlying runner (if any).
     try:
-        await asyncio.to_thread(MANAGER.stop, user["id"], row["backend"])
+        await asyncio.to_thread(MANAGER.stop_agent, agent_id)
     except Exception:
         log.exception("failed to stop runner during agent delete %s", agent_id)
     # cascade delete the agent's conversations and the agent itself.
@@ -2232,6 +2231,31 @@ async def api_delete_agent(
         conn.execute("DELETE FROM conversations WHERE agent_id = ?", (agent_id,))
         conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
     return Response(status_code=204)
+
+
+@app.post("/api/agents/{agent_id}/start")
+async def api_agent_runner_start(
+    agent_id: str,
+    user: dict[str, Any] = Depends(current_user),
+):
+    row = _get_user_agent(agent_id, user["id"])
+    runner = await asyncio.to_thread(MANAGER.ensure_for_agent, user, row)
+    return {"runner": {
+        "agent_id": agent_id,
+        "backend": row["backend"],
+        "container_name": runner["container_name"],
+        "host_port": runner["host_port"],
+    }}
+
+
+@app.delete("/api/agents/{agent_id}/runner")
+async def api_agent_runner_stop(
+    agent_id: str,
+    user: dict[str, Any] = Depends(current_user),
+):
+    _get_user_agent(agent_id, user["id"])  # auth check
+    stopped = await asyncio.to_thread(MANAGER.stop_agent, agent_id)
+    return {"stopped": stopped}
 
 
 class ConversationCreate(BaseModel):

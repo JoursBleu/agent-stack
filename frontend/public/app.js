@@ -39,6 +39,27 @@ const I18N = {
     "sidebar.start_chat_with": "Start a new chat with {agent}",
     "sidebar.coming_soon": "coming soon",
     "sidebar.coming_soon_hint": "This backend isn't deployed yet.",
+    "sidebar.new_agent": "+ New agent",
+    "sidebar.new_agent_remaining": "+ New agent ({n} left)",
+    "sidebar.max_agents_reached": "Max {n} agents per backend",
+    "sidebar.agent_rename": "Rename agent",
+    "sidebar.agent_edit_model": "Edit model override",
+    "sidebar.agent_delete": "Delete agent",
+    "sidebar.agent_actions": "Agent actions",
+    "agent.create_title": "Create a new agent",
+    "agent.create_backend": "Backend",
+    "agent.create_name": "Name",
+    "agent.create_model": "Model (optional)",
+    "agent.create_model_hint": "Leave blank to use backend default.",
+    "agent.create_submit": "Create",
+    "agent.create_cancel": "Cancel",
+    "agent.create_failed": "Create failed: ",
+    "agent.rename_prompt": "New name for this agent:",
+    "agent.edit_model_prompt": "Model override (leave blank to clear):",
+    "agent.delete_confirm": "Delete agent \"{name}\"?\n\nThis will also delete {n} conversation(s) and stop its runner.",
+    "agent.delete_failed": "Delete failed: ",
+    "agent.no_agents_hint": "No agents yet for this backend.",
+    "agent.ordinal_badge": "#{n}",
 
     "chat.empty_title": "Select a conversation or start a new one",
     "chat.composer_ph": "Send a message\u2026",
@@ -172,6 +193,27 @@ const I18N = {
     "sidebar.start_chat_with": "与 {agent} 开启新对话",
     "sidebar.coming_soon": "即将上线",
     "sidebar.coming_soon_hint": "该后端尚未部署。",
+    "sidebar.new_agent": "+ 新建 Agent",
+    "sidebar.new_agent_remaining": "+ 新建 Agent（还剩 {n} 个名额）",
+    "sidebar.max_agents_reached": "每个后端最多 {n} 个 Agent",
+    "sidebar.agent_rename": "重命名 Agent",
+    "sidebar.agent_edit_model": "修改模型覆盖",
+    "sidebar.agent_delete": "删除 Agent",
+    "sidebar.agent_actions": "Agent 操作",
+    "agent.create_title": "新建 Agent",
+    "agent.create_backend": "后端",
+    "agent.create_name": "名称",
+    "agent.create_model": "模型（可选）",
+    "agent.create_model_hint": "留空使用后端默认。",
+    "agent.create_submit": "创建",
+    "agent.create_cancel": "取消",
+    "agent.create_failed": "创建失败：",
+    "agent.rename_prompt": "新的 Agent 名称：",
+    "agent.edit_model_prompt": "模型覆盖（留空清除）：",
+    "agent.delete_confirm": "删除 Agent “{name}”？\n\n这将同时删除 {n} 条对话并停止它的运行容器。",
+    "agent.delete_failed": "删除失败：",
+    "agent.no_agents_hint": "此后端尚未创建任何 Agent。",
+    "agent.ordinal_badge": "#{n}",
 
     "chat.empty_title": "选择或新建一个对话",
     "chat.composer_ph": "输入消息…",
@@ -328,12 +370,15 @@ const State = {
   user: null,
   backends: [],
   models: [],            // [{id, root, display_name, running}]
-  runners: {},
+  runners: {},          // keyed by agent_id when present, else legacy backend
   chats: [],
   activeChatId: null,
   authMode: "login",
   progressES: null,
   expandedBackends: new Set(),
+  agents: [],            // [{id, user_id, backend, name, model, ordinal, running, runner, ...}]
+  expandedAgents: new Set(),
+  maxAgentsPerBackend: 3,
 };
 
 async function api(method, path, body) {
@@ -475,6 +520,7 @@ async function routeFromLocation() {
       if (c) {
         chat = {
           id: c.id, backend: c.backend, model: c.model,
+          agentId: c.agent_id || "",
           seq: c.seq || parsed.seq,
           title: c.title || "",
           messages: (r.messages || []).map(m => ({ id: m.id, role: m.role, content: m.content })),
@@ -484,6 +530,7 @@ async function routeFromLocation() {
         };
         State.chats.unshift(chat);
         State.expandedBackends.add(chat.backend);
+        if (chat.agentId) State.expandedAgents.add(chat.agentId);
       }
     } catch {}
   }
@@ -507,6 +554,7 @@ async function enterApp() {
   $("#app-view").classList.remove("hidden");
   $("#user-display").textContent = State.user.email;
   $("#admin-btn").classList.toggle("hidden", State.user.role !== "admin");
+  await loadAgents();
   await loadChats();
   await refreshBackends();
   await refreshRunners();
@@ -550,6 +598,8 @@ async function refreshModels() {
 }
 
 async function refreshRunners() {
+  // keep agents in sync with the runner table (running flag, host_port, etc.)
+  await loadAgents();
   try {
     const r = await api("GET", "/api/runners");
     const map = {};
@@ -567,56 +617,77 @@ function renderSidebar() {
     root.innerHTML = `<div class="sb-empty">${escapeHtml(t("sidebar.no_backends"))}</div>`;
     return;
   }
-  // group chats by backend
-  const chatsByBackend = {};
-  for (const c of State.chats) {
-    if (!chatsByBackend[c.backend]) chatsByBackend[c.backend] = [];
-    chatsByBackend[c.backend].push(c);
-  }
+  // index: agents by backend; chats by agentId
+  const agentsByBackend = {};
+  for (const a of State.agents) (agentsByBackend[a.backend] = agentsByBackend[a.backend] || []).push(a);
+  for (const k of Object.keys(agentsByBackend)) agentsByBackend[k].sort((x, y) => x.ordinal - y.ordinal);
+  const chatsByAgent = {};
+  for (const c of State.chats) (chatsByAgent[c.agentId] = chatsByAgent[c.agentId] || []).push(c);
+  const max = State.maxAgentsPerBackend || 3;
+
   for (const b of State.backends) {
-    const runner  = State.runners[b.name];
-    const running = !!runner;
-    // collect agent variants for this backend (excluding the bare backend root id,
-    // which duplicates the group header)
-    const variants = (State.models || [])
-      .filter(m => m.root === b.name && m.id !== b.name)
-      .map(m => m.id);
-    if (variants.length === 0) variants.push(b.name);
-
-    const chats = (chatsByBackend[b.name] || []).sort((a, b2) => b2.updated_at - a.updated_at);
-
-    const expanded = State.expandedBackends.has(b.name);
     const disabled = !!b.disabled;
+    const bAgents = agentsByBackend[b.name] || [];
+    const anyRunning = bAgents.some(a => a.running);
+    const expanded = State.expandedBackends.has(b.name);
     const group = document.createElement("div");
-    group.className = "backend-group" + (running ? " running" : "") + (disabled ? " disabled" : "");
+    group.className = "backend-group" + (anyRunning ? " running" : "") + (disabled ? " disabled" : "");
+
+    const remaining = Math.max(0, max - bAgents.length);
+    const newAgentHtml = (disabled || remaining === 0) ? "" :
+      `<div class="agent-create-row" data-backend="${escapeHtml(b.name)}">
+         <div class="title">${escapeHtml(t("sidebar.new_agent_remaining", {n: remaining}))}</div>
+       </div>`;
+
     group.innerHTML = `
       <div class="backend-head" data-toggle="${escapeHtml(b.name)}">
         <span class="caret">${expanded ? "▾" : "▸"}</span>
-        <span class="dot ${running ? "on" : "off"}"></span>
+        <span class="dot ${anyRunning ? "on" : "off"}"></span>
         <span class="name">${escapeHtml(b.display_name || b.name)}</span>
-        <span class="status">${escapeHtml(disabled ? t("sidebar.coming_soon") : (running ? t("chat.running") : t("chat.idle")))}</span>
-        <span class="actions">
-          ${(running && !disabled) ? `<button class="stop" data-backend="${escapeHtml(b.name)}" title="${escapeHtml(t("sidebar.pause"))}">×</button>` : ""}
-          ${(!running && !disabled) ? `<button class="start" data-backend="${escapeHtml(b.name)}" title="${escapeHtml(t("sidebar.start"))}">▶</button>` : ""}
-        </span>
+        <span class="status">${escapeHtml(disabled ? t("sidebar.coming_soon") : (anyRunning ? t("chat.running") : t("chat.idle")))}</span>
       </div>
       ${expanded ? `
         <div class="backend-body">
+          ${disabled ? `<div class="sb-empty">${escapeHtml(t("sidebar.coming_soon_hint"))}</div>` : ""}
+          ${(!disabled && bAgents.length === 0) ? `<div class="sb-empty">${escapeHtml(t("agent.no_agents_hint"))}</div>` : ""}
+          ${bAgents.map(a => renderAgentBlock(a, chatsByAgent[a.id] || [], b)).join("")}
+          ${newAgentHtml}
+        </div>
+      ` : ""}
+    `;
+    root.appendChild(group);
+  }
+
+  wireSidebarEvents(root);
+}
+
+function renderAgentBlock(agent, chats, backend) {
+  chats = chats.slice().sort((a, b) => b.updated_at - a.updated_at);
+  const expanded = State.expandedAgents.has(agent.id) || chats.some(c => c.id === State.activeChatId);
+  const runner = agent.runner;
+  const newChatLabel = t("sidebar.new_chat");
+  const stopBtn = agent.running ? `<button class="agent-stop" data-agent="${escapeHtml(agent.id)}" title="${escapeHtml(t("sidebar.pause"))}">×</button>` : "";
+  const startBtn = (!agent.running && !backend.disabled) ? `<button class="agent-start" data-agent="${escapeHtml(agent.id)}" title="${escapeHtml(t("sidebar.start"))}">▶</button>` : "";
+  return `
+    <div class="agent-group ${agent.running ? "running" : ""}">
+      <div class="agent-head" data-agent-toggle="${escapeHtml(agent.id)}">
+        <span class="caret">${expanded ? "▾" : "▸"}</span>
+        <span class="dot ${agent.running ? "on" : "off"}"></span>
+        <span class="name">${escapeHtml(agent.name)}</span>
+        <span class="ordinal" title="${escapeHtml(t("agent.ordinal_badge", {n: agent.ordinal}))}">${escapeHtml(t("agent.ordinal_badge", {n: agent.ordinal}))}</span>
+        <span class="agent-actions">
+          ${startBtn}${stopBtn}
+          <button class="agent-rename" data-agent="${escapeHtml(agent.id)}" title="${escapeHtml(t("sidebar.agent_rename"))}">✎</button>
+          <button class="agent-edit-model" data-agent="${escapeHtml(agent.id)}" title="${escapeHtml(t("sidebar.agent_edit_model"))}">⚙</button>
+          <button class="agent-del" data-agent="${escapeHtml(agent.id)}" data-name="${escapeHtml(agent.name)}" data-count="${chats.length}" title="${escapeHtml(t("sidebar.agent_delete"))}">×</button>
+        </span>
+      </div>
+      ${expanded ? `
+        <div class="agent-body">
           <div class="chats-block">
-            ${disabled
-              ? `<div class="sb-empty">${escapeHtml(t("sidebar.coming_soon_hint"))}</div>`
-              : (variants.length > 1
-                ? variants.map(modelId => {
-                    const label = modelId === b.name
-                      ? (b.display_name || b.name)
-                      : modelId.split("/").slice(1).join("/");
-                    return `<div class="chat-row new-chat-row" data-backend="${escapeHtml(b.name)}" data-model="${escapeHtml(modelId)}" title="${escapeHtml(t("sidebar.start_chat_with", {agent: label}))}">
-                      <div class="title">+ ${escapeHtml(t("sidebar.new_chat"))} · ${escapeHtml(label)}</div>
-                    </div>`;
-                  }).join("")
-                : `<div class="chat-row new-chat-row" data-backend="${escapeHtml(b.name)}" data-model="${escapeHtml(variants[0])}">
-                    <div class="title">+ ${escapeHtml(t("sidebar.new_chat"))}</div>
-                  </div>`)}
+            <div class="chat-row new-chat-row" data-agent="${escapeHtml(agent.id)}">
+              <div class="title">+ ${escapeHtml(newChatLabel)}</div>
+            </div>
             ${chats.map(c => {
               const isActive = c.id === State.activeChatId;
               return `<div class="chat-row${isActive ? " active" : ""}" data-id="${escapeHtml(c.id)}">
@@ -626,55 +697,74 @@ function renderSidebar() {
               </div>`;
             }).join("")}
           </div>
-          ${(running && !disabled) ? `<div class="releases-meta">${escapeHtml(t("chat.releases_in", {t: fmtDuration(runner.stops_in_seconds)}))}</div>` : ""}
+          ${(agent.running && runner && typeof runner.stops_in_seconds === "number") ? `<div class="releases-meta">${escapeHtml(t("chat.releases_in", {t: fmtDuration(runner.stops_in_seconds)}))}</div>` : ""}
         </div>
       ` : ""}
-    `;
-    root.appendChild(group);
-  }
-  // wire events
+    </div>
+  `;
+}
+
+function wireSidebarEvents(root) {
   root.querySelectorAll(".backend-head").forEach(h => {
     h.addEventListener("click", (ev) => {
-      if (ev.target.closest(".actions")) return;
       const name = h.dataset.toggle;
       if (State.expandedBackends.has(name)) State.expandedBackends.delete(name);
       else State.expandedBackends.add(name);
       renderSidebar();
     });
   });
-  root.querySelectorAll(".backend-head .stop").forEach(b => {
+  root.querySelectorAll(".agent-head").forEach(h => {
+    h.addEventListener("click", (ev) => {
+      if (ev.target.closest(".agent-actions")) return;
+      const id = h.dataset.agentToggle;
+      if (State.expandedAgents.has(id)) State.expandedAgents.delete(id);
+      else State.expandedAgents.add(id);
+      renderSidebar();
+    });
+  });
+  root.querySelectorAll(".agent-create-row").forEach(el => {
+    el.addEventListener("click", () => promptCreateAgent(el.dataset.backend));
+  });
+  root.querySelectorAll(".agent-start").forEach(b => {
     b.addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      const name = b.dataset.backend;
-      if (!confirm(t("chat.confirm_stop_runner", {backend: name}))) return;
-      try { await api("DELETE", `/api/runners/${name}`); }
+      const agent = State.agents.find(a => a.id === b.dataset.agent);
+      if (!agent) return;
+      try { await api("POST", `/api/agents/${agent.id}/start`); }
       catch (e) { alert(e.message); return; }
       await refreshRunners();
     });
   });
-  root.querySelectorAll(".backend-head .start").forEach(b => {
+  root.querySelectorAll(".agent-stop").forEach(b => {
     b.addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      const name = b.dataset.backend;
-      try { await api("POST", `/api/runners/${name}/start`); }
+      const agent = State.agents.find(a => a.id === b.dataset.agent);
+      if (!agent) return;
+      if (!confirm(t("chat.confirm_stop_runner", {backend: agent.name}))) return;
+      try { await api("DELETE", `/api/agents/${agent.id}/runner`); }
       catch (e) { alert(e.message); return; }
       await refreshRunners();
     });
   });
-  root.querySelectorAll(".agent-row").forEach(el => {
-    el.addEventListener("click", () => {
-      const backend = State.backends.find(x => x.name === el.dataset.backend);
-      if (!backend) return;
-      createChat(backend, el.dataset.model);
+  root.querySelectorAll(".agent-rename").forEach(b => {
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); promptRenameAgent(b.dataset.agent); });
+  });
+  root.querySelectorAll(".agent-edit-model").forEach(b => {
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); promptEditAgentModel(b.dataset.agent); });
+  });
+  root.querySelectorAll(".agent-del").forEach(b => {
+    b.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      confirmDeleteAgent(b.dataset.agent, b.dataset.name, parseInt(b.dataset.count || "0", 10));
     });
   });
   root.querySelectorAll(".chat-row").forEach(row => {
     row.addEventListener("click", (ev) => {
       if (ev.target.classList.contains("chat-del") || ev.target.classList.contains("chat-rename")) return;
-      // "+ New chat" rows have no data-id; route to createChat instead
       if (row.classList.contains("new-chat-row")) {
-        const backend = State.backends.find(x => x.name === row.dataset.backend);
-        if (backend) createChat(backend, row.dataset.model);
+        const agentId = row.dataset.agent;
+        const agent = State.agents.find(a => a.id === agentId);
+        if (agent) createChatForAgent(agent);
         return;
       }
       selectChat(row.dataset.id, { pushUrl: true });
@@ -701,11 +791,91 @@ function renderSidebar() {
     });
   });
   root.querySelectorAll(".chat-rename").forEach(b => {
-    b.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      promptRenameChat(b.dataset.id);
-    });
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); promptRenameChat(b.dataset.id); });
   });
+}
+
+// --- Agent CRUD UI ------------------------------------------------------
+
+async function promptCreateAgent(backendName) {
+  const backend = State.backends.find(b => b.name === backendName);
+  if (!backend) return;
+  if (!(await ensureUpstreamConfigured(backendName))) return;
+  const name = (prompt(`${t("agent.create_title")} (${backend.display_name || backend.name})\n\n${t("agent.create_name")}:`, "") || "").trim();
+  if (!name) return;
+  const modelRaw = prompt(`${t("agent.create_model")} (${t("agent.create_model_hint")})`, "");
+  if (modelRaw === null) return;
+  const model = (modelRaw || "").trim();
+  let r;
+  try {
+    r = await api("POST", "/api/agents", { backend: backend.name, name, model });
+  } catch (e) { alert(t("agent.create_failed") + e.message); return; }
+  await loadAgents();
+  State.expandedBackends.add(backend.name);
+  if (r && r.agent && r.agent.id) State.expandedAgents.add(r.agent.id);
+  renderSidebar();
+}
+
+async function promptRenameAgent(agentId) {
+  const agent = State.agents.find(a => a.id === agentId);
+  if (!agent) return;
+  const name = (prompt(t("agent.rename_prompt"), agent.name) || "").trim();
+  if (!name || name === agent.name) return;
+  try { await api("PATCH", `/api/agents/${agentId}`, { name }); }
+  catch (e) { alert(e.message); return; }
+  await loadAgents();
+  renderSidebar();
+}
+
+async function promptEditAgentModel(agentId) {
+  const agent = State.agents.find(a => a.id === agentId);
+  if (!agent) return;
+  const v = prompt(t("agent.edit_model_prompt"), agent.model || "");
+  if (v === null) return;
+  try { await api("PATCH", `/api/agents/${agentId}`, { model: v.trim() }); }
+  catch (e) { alert(e.message); return; }
+  await loadAgents();
+  renderSidebar();
+}
+
+async function confirmDeleteAgent(agentId, name, chatCount) {
+  if (!confirm(t("agent.delete_confirm", {name, n: chatCount}))) return;
+  try { await api("DELETE", `/api/agents/${agentId}`); }
+  catch (e) { alert(t("agent.delete_failed") + e.message); return; }
+  // drop affected chats from local cache
+  State.chats = State.chats.filter(c => c.agentId !== agentId);
+  if (State.activeChatId && !State.chats.find(c => c.id === State.activeChatId)) {
+    State.activeChatId = null;
+    $("#messages").innerHTML = "";
+    $("#chat-title").textContent = t("chat.empty_title");
+    $("#chat-meta").textContent = "";
+    $("#composer-input").disabled = true;
+    $("#composer-send").disabled = true;
+    try { history.pushState({}, "", "/"); } catch {}
+  }
+  State.expandedAgents.delete(agentId);
+  await loadAgents();
+  renderSidebar();
+}
+
+async function createChatForAgent(agent) {
+  if (!(await ensureUpstreamConfigured(agent.backend))) return;
+  let r;
+  try { r = await api("POST", "/api/conversations", { agent_id: agent.id }); }
+  catch (e) { alert(t("chat.create_failed") + e.message); return; }
+  const c = r.conversation;
+  State.chats.unshift({
+    id: c.id, backend: c.backend, model: c.model,
+    agentId: c.agent_id || agent.id,
+    seq: c.seq || null,
+    title: c.title || "",
+    messages: [],
+    messageCount: 0,
+    updated_at: c.updated_at * 1000,
+    loaded: true,
+  });
+  State.expandedAgents.add(agent.id);
+  selectChat(c.id, { pushUrl: false });
 }
 
 async function promptRenameChat(id) {
@@ -752,6 +922,7 @@ async function loadChats() {
     const r = await api("GET", "/api/conversations");
     State.chats = (r.conversations || []).map(c => ({
       id: c.id, backend: c.backend, model: c.model,
+      agentId: c.agent_id || "",
       seq: c.seq || null,
       title: c.title || "",
       messages: [],
@@ -759,9 +930,25 @@ async function loadChats() {
       updated_at: c.updated_at * 1000,
       loaded: false,
     }));
-    // auto-expand any backend that has at least one chat
-    for (const c of State.chats) State.expandedBackends.add(c.backend);
+    // auto-expand any backend / agent that has at least one chat
+    for (const c of State.chats) {
+      State.expandedBackends.add(c.backend);
+      if (c.agentId) State.expandedAgents.add(c.agentId);
+    }
   } catch { State.chats = []; }
+}
+
+async function loadAgents() {
+  try {
+    const r = await api("GET", "/api/agents");
+    State.agents = (r.agents || []).map(a => ({
+      id: a.id, backend: a.backend, name: a.name, model: a.model || "",
+      ordinal: a.ordinal, running: !!a.running,
+      runner: a.runner || null,
+      created_at: a.created_at, updated_at: a.updated_at,
+    }));
+    if (typeof r.max_per_backend === "number") State.maxAgentsPerBackend = r.max_per_backend;
+  } catch { State.agents = []; }
 }
 
 async function selectChat(id, opts) {
@@ -993,6 +1180,8 @@ async function ensureUpstreamConfigured(backendName) {
 }
 
 async function createChat(backend, modelId) {
+  // Legacy entry: create or reuse the ordinal=1 agent for this backend,
+  // then start a chat under it.
   if (!(await ensureUpstreamConfigured(backend.name))) return;
   let r;
   try {
@@ -1001,6 +1190,7 @@ async function createChat(backend, modelId) {
   const c = r.conversation;
   State.chats.unshift({
     id: c.id, backend: c.backend, model: c.model,
+    agentId: c.agent_id || "",
     seq: c.seq || null,
     title: c.title || "",
     messages: [],
@@ -1008,6 +1198,9 @@ async function createChat(backend, modelId) {
     updated_at: c.updated_at * 1000,
     loaded: true,
   });
+  if (c.agent_id) State.expandedAgents.add(c.agent_id);
+  // Refresh agent list so the newly-auto-created ordinal=1 agent appears.
+  loadAgents().then(renderSidebar);
   selectChat(c.id, { pushUrl: false });
 }
 

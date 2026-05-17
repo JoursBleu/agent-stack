@@ -602,3 +602,26 @@ input, textarea, select { font: inherit; }
 
 .idle-row .idle-disable-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-faint); cursor: pointer; }
 .idle-row .idle-modal-input[disabled] { opacity: 0.5; }
+
+/* === multi-agent sidebar (step 4) =================================== */
+.backend-body .agent-group { margin: 4px 0 8px; border-radius: 6px; }
+.backend-body .agent-group.running { background: var(--bg-elev1); }
+.backend-body .agent-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; user-select: none; font-size: 12px; }
+.backend-body .agent-head:hover { background: var(--bg-elev2); }
+.backend-body .agent-head .caret { width: 12px; color: var(--text-faint); font-size: 10px; }
+.backend-body .agent-head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.backend-body .agent-head .dot.on { background: var(--success, #23c069); box-shadow: 0 0 5px var(--success, #23c069); }
+.backend-body .agent-head .name { flex: 1; color: var(--text); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.backend-body .agent-head .ordinal { color: var(--text-faint); font-size: 10px; font-family: var(--mono, monospace); }
+.backend-body .agent-actions { display: none; gap: 2px; }
+.backend-body .agent-head:hover .agent-actions { display: flex; }
+.backend-body .agent-actions button { background: transparent; border: 1px solid transparent; color: var(--text-faint); cursor: pointer; padding: 1px 5px; border-radius: 4px; font-size: 11px; line-height: 1.2; }
+.backend-body .agent-actions button:hover { color: var(--accent, #4a8cf0); border-color: var(--border); background: var(--bg-elev3); }
+.backend-body .agent-actions .agent-del:hover { color: var(--danger); border-color: var(--danger); }
+.backend-body .agent-actions .agent-stop:hover { color: var(--danger); border-color: var(--danger); }
+.backend-body .agent-actions .agent-start:hover { color: var(--accent); border-color: var(--accent); }
+.backend-body .agent-body { padding: 2px 0 6px 14px; }
+.backend-body .agent-body .chat-row { padding: 6px 8px; font-size: 12px; }
+.backend-body .agent-create-row { padding: 6px 8px; margin: 2px 0 4px 14px; border: 1px dashed var(--border); border-radius: 6px; cursor: pointer; color: var(--accent, #4a8cf0); font-size: 12px; text-align: center; }
+.backend-body .agent-create-row:hover { background: var(--bg-elev2); }
+.backend-body .agent-create-row .title { color: var(--accent, #4a8cf0); font-weight: 500; }
