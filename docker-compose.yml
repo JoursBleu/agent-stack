@@ -14,7 +14,12 @@ services:
       BACKENDS_CONFIG_PATH: ${STACK_DATA_ROOT:-/data}/backends.json
       HOST_STACK_ROOT: ${HOST_STACK_ROOT}
 
-      ROUTER_BIND_HOST: ${ROUTER_BIND_HOST:-127.0.0.1}
+      # Default 0.0.0.0 so per-agent runner containers can call back via
+      # 172.17.0.1 (the docker0 gateway). The router itself runs with
+      # network_mode: host, so 0.0.0.0 also covers 127.0.0.1 used by the
+      # frontend reverse proxy. All /api/* routes still require JWT;
+      # /api/internal/* requires runner api-key.
+      ROUTER_BIND_HOST: ${ROUTER_BIND_HOST:-0.0.0.0}
       ROUTER_PORT: ${ROUTER_PORT:-18080}
       ROUTER_PUBLIC_BASE_URL: ${ROUTER_PUBLIC_BASE_URL:-}
 
