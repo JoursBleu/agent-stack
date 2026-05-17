@@ -406,6 +406,33 @@ def db_init() -> None:
         if runner_cols and "agent_id" not in runner_cols:
             log.info("migrating runners: adding agent_id column")
             conn.execute("ALTER TABLE runners ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+        # Rebuild runners with agent_id as PRIMARY KEY (one runner per agent).
+        # Detect legacy schema by looking for the (user_id, backend) composite PK.
+        runner_cols = list(conn.execute("PRAGMA table_info(runners)"))
+        pk_cols = sorted(c["name"] for c in runner_cols if c["pk"])
+        if pk_cols == ["backend", "user_id"]:
+            log.info("rebuilding runners table: switching PK to agent_id")
+            conn.execute("CREATE TABLE runners_new (\n"
+                "    agent_id TEXT PRIMARY KEY,\n"
+                "    user_id TEXT NOT NULL,\n"
+                "    backend TEXT NOT NULL,\n"
+                "    container_name TEXT NOT NULL,\n"
+                "    host_port INTEGER NOT NULL,\n"
+                "    api_key TEXT NOT NULL,\n"
+                "    started_at INTEGER NOT NULL,\n"
+                "    last_active INTEGER NOT NULL\n"
+                ")")
+            # Carry over any existing rows that already have agent_id stamped
+            # (would have happened if step1+step2 ran together on a fresh DB);
+            # in practice the prod DB has no runner rows, so this is a no-op.
+            conn.execute(
+                "INSERT INTO runners_new (agent_id, user_id, backend, container_name, host_port, api_key, started_at, last_active) "
+                "SELECT agent_id, user_id, backend, container_name, host_port, api_key, started_at, last_active "
+                "FROM runners WHERE agent_id != ''"
+            )
+            conn.execute("DROP TABLE runners")
+            conn.execute("ALTER TABLE runners_new RENAME TO runners")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runners_user_backend ON runners(user_id, backend)")
         # Backfill: every (user_id, backend) pair that has a runner or a
         # conversation needs a corresponding agent (ordinal=1, name=backend).
         need_default = conn.execute(
@@ -654,6 +681,28 @@ class RunnerManager:
             rows = conn.execute("SELECT * FROM runners").fetchall()
         return [dict(r) for r in rows]
 
+    def get_runner_for_agent(self, agent_id: str) -> dict[str, Any] | None:
+        if not agent_id:
+            return None
+        with db_connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runners WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def _runner_naming(self, backend_def: "Backend", user: dict[str, Any], agent: sqlite3.Row | dict[str, Any]) -> tuple[str, Path]:
+        """Return (container_name, home_dir) for an agent.
+        Ordinal=1 uses the legacy name/path so existing prod data keeps working."""
+        ordinal = int(agent["ordinal"]) if "ordinal" in (agent.keys() if hasattr(agent, "keys") else agent) else 1
+        if ordinal == 1:
+            container = f"{backend_def.container_prefix}-{user['slug']}"
+            home = USERS_ROOT / user["slug"] / backend_def.name
+        else:
+            container = f"{backend_def.container_prefix}-{user['slug']}-a{ordinal}"
+            home = USERS_ROOT / user["slug"] / f"{backend_def.name}-a{ordinal}"
+        return container, home
+
+
     def get_idle_seconds(self, user_id: str, backend: str) -> int:
         backend_def = BACKENDS[backend]
         with db_connect() as conn:
@@ -794,11 +843,21 @@ class RunnerManager:
         return seconds
 
     def touch(self, user_id: str, backend: str) -> None:
+        # Legacy entrypoint — touch the ordinal=1 runner only.
         now = int(time.time())
         with _DB_LOCK, db_connect() as conn:
             conn.execute(
-                "UPDATE runners SET last_active = ? WHERE user_id = ? AND backend = ?",
-                (now, user_id, backend),
+                "UPDATE runners SET last_active = ? WHERE user_id = ? AND backend = ? AND agent_id IN "
+                "(SELECT id FROM agents WHERE user_id = ? AND backend = ? AND ordinal = 1)",
+                (now, user_id, backend, user_id, backend),
+            )
+
+    def touch_agent(self, agent_id: str) -> None:
+        now = int(time.time())
+        with _DB_LOCK, db_connect() as conn:
+            conn.execute(
+                "UPDATE runners SET last_active = ? WHERE agent_id = ?",
+                (now, agent_id),
             )
 
     # -- ports ----------------------------------------------------------
@@ -824,8 +883,9 @@ class RunnerManager:
         user: dict[str, Any],
         backend_def: Backend,
         env_overrides: dict[str, str] | None = None,
+        home_dir: Path | None = None,
     ) -> Path:
-        home = USERS_ROOT / user["slug"] / backend_def.name
+        home = home_dir if home_dir is not None else (USERS_ROOT / user["slug"] / backend_def.name)
         home.mkdir(parents=True, exist_ok=True)
         seed = SEEDS_ROOT / backend_def.seed_subdir
         templated = {t.lstrip("/") for t in (backend_def.templated_files or [])}
@@ -895,7 +955,19 @@ class RunnerManager:
     # -- ensure ---------------------------------------------------------
 
     def ensure(self, user: dict[str, Any], backend_name: str) -> dict[str, Any]:
-        """Idempotently make sure a runner exists and is reachable. Blocking."""
+        """Legacy entrypoint: ensure the ordinal=1 agent's runner for this backend."""
+        backend_def = BACKENDS.get(backend_name)
+        if backend_def is None:
+            raise HTTPException(status_code=404, detail=f"unknown backend {backend_name}")
+        if backend_def.disabled:
+            raise HTTPException(status_code=503, detail=f"backend {backend_name} is a placeholder and not yet available")
+        agent = _ensure_legacy_agent(user["id"], backend_name)
+        return self.ensure_for_agent(user, agent)
+
+    def ensure_for_agent(self, user: dict[str, Any], agent: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        """Idempotently make sure a runner exists for this specific agent. Blocking."""
+        backend_name = agent["backend"]
+        agent_id = agent["id"]
         backend_def = BACKENDS.get(backend_name)
         if backend_def is None:
             raise HTTPException(status_code=404, detail=f"unknown backend {backend_name}")
@@ -903,7 +975,7 @@ class RunnerManager:
             raise HTTPException(status_code=503, detail=f"backend {backend_name} is a placeholder and not yet available")
 
         with self._lock:
-            existing = self.get_runner(user["id"], backend_def.name)
+            existing = self.get_runner_for_agent(agent_id)
             if existing:
                 # verify container still exists & running; if not, drop & rebuild
                 try:
@@ -940,10 +1012,10 @@ class RunnerManager:
                             "Backend API keys"
                         ),
                     )
-                home = self._ensure_user_home(user, backend_def, effective_env)
+                container_name, home_dir = self._runner_naming(backend_def, user, agent)
+                home = self._ensure_user_home(user, backend_def, effective_env, home_dir=home_dir)
                 port = self._pick_free_port()
                 api_key = secrets.token_hex(24)
-                container_name = f"{backend_def.container_prefix}-{user['slug']}"
                 env = dict(backend_def.extra_env)
                 env[backend_def.api_key_env] = api_key
                 env["AGENT_USER_ID"] = user["id"]
@@ -1037,10 +1109,10 @@ class RunnerManager:
                         conn.execute(
                             """
                             INSERT INTO runners
-                              (user_id, backend, container_name, host_port, api_key, started_at, last_active)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                              (agent_id, user_id, backend, container_name, host_port, api_key, started_at, last_active)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                             """,
-                            (user["id"], backend_def.name, container_name, port, api_key, now, now),
+                            (agent_id, user["id"], backend_def.name, container_name, port, api_key, now, now),
                         )
                 except HTTPException:
                     # Already a typed error with rich detail; let it propagate.
@@ -1071,15 +1143,19 @@ class RunnerManager:
             self._emit_progress(user["id"], backend_def.name, RunnerEvent(
                 stage="health_wait", progress=60, message="waiting for backend health",
             ))
-            self._wait_ready(user["id"], backend_def)
+            self._wait_ready_for_agent(user["id"], backend_def, agent_id)
             self._emit_progress(user["id"], backend_def.name, RunnerEvent(
                 stage="ready", progress=100, message="ready",
             ))
-            self.touch(user["id"], backend_def.name)
-            return self.get_runner(user["id"], backend_def.name)  # type: ignore[return-value]
+            self.touch_agent(agent_id)
+            return self.get_runner_for_agent(agent_id)  # type: ignore[return-value]
 
     def _wait_ready(self, user_id: str, backend_def: Backend) -> None:
-        runner = self.get_runner(user_id, backend_def.name)
+        agent = _ensure_legacy_agent(user_id, backend_def.name)
+        return self._wait_ready_for_agent(user_id, backend_def, agent["id"])
+
+    def _wait_ready_for_agent(self, user_id: str, backend_def: Backend, agent_id: str) -> None:
+        runner = self.get_runner_for_agent(agent_id)
         if not runner:
             raise RuntimeError("runner row vanished while waiting")
         url_health = f"http://{BACKEND_HOST}:{runner['host_port']}{backend_def.health_path}"
@@ -1139,7 +1215,18 @@ class RunnerManager:
     # -- stop -----------------------------------------------------------
 
     def stop(self, user_id: str, backend: str) -> bool:
-        runner = self.get_runner(user_id, backend)
+        """Legacy entrypoint: stop the ordinal=1 agent's runner for (user, backend)."""
+        with db_connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM agents WHERE user_id = ? AND backend = ? AND ordinal = 1",
+                (user_id, backend),
+            ).fetchone()
+        if not row:
+            return False
+        return self.stop_agent(row["id"])
+
+    def stop_agent(self, agent_id: str) -> bool:
+        runner = self.get_runner_for_agent(agent_id)
         if not runner:
             return False
         try:
@@ -1153,14 +1240,12 @@ class RunnerManager:
                     pass
         except NotFound:
             pass
-        self._delete_runner_row(user_id, backend)
+        self._delete_runner_row_for_agent(agent_id)
         return True
 
-    def _delete_runner_row(self, user_id: str, backend: str) -> None:
+    def _delete_runner_row_for_agent(self, agent_id: str) -> None:
         with _DB_LOCK, db_connect() as conn:
-            conn.execute(
-                "DELETE FROM runners WHERE user_id = ? AND backend = ?", (user_id, backend)
-            )
+            conn.execute("DELETE FROM runners WHERE agent_id = ?", (agent_id,))
 
     # -- reaper ---------------------------------------------------------
 
@@ -1180,11 +1265,11 @@ class RunnerManager:
                 container_status = None
             if container_status in ("exited", "dead", "missing"):
                 log.info(
-                    "reaping dead runner user=%s backend=%s status=%s",
-                    runner["user_id"], runner["backend"], container_status,
+                    "reaping dead runner agent_id=%s user=%s backend=%s status=%s",
+                    runner.get("agent_id", ""), runner["user_id"], runner["backend"], container_status,
                 )
                 try:
-                    self.stop(runner["user_id"], runner["backend"])
+                    self.stop_agent(runner["agent_id"])
                     reaped.append(runner["container_name"])
                 except Exception:
                     log.exception("dead-runner cleanup failed for %s", runner["container_name"])
@@ -1195,11 +1280,11 @@ class RunnerManager:
                 continue
             if now - int(runner["last_active"]) > idle_limit:
                 log.info(
-                    "reaping idle runner user=%s backend=%s idle=%ss limit=%ss",
-                    runner["user_id"], runner["backend"], now - int(runner["last_active"]), idle_limit,
+                    "reaping idle runner agent_id=%s user=%s backend=%s idle=%ss limit=%ss",
+                    runner.get("agent_id", ""), runner["user_id"], runner["backend"], now - int(runner["last_active"]), idle_limit,
                 )
                 try:
-                    self.stop(runner["user_id"], runner["backend"])
+                    self.stop_agent(runner["agent_id"])
                     reaped.append(runner["container_name"])
                 except Exception:
                     log.exception("reap failed for %s", runner["container_name"])
