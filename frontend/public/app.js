@@ -668,7 +668,7 @@ function renderAgentBlock(agent, chats, backend) {
   const expanded = State.expandedAgents.has(agent.id) || chats.some(c => c.id === State.activeChatId);
   const runner = agent.runner;
   const newChatLabel = t("sidebar.new_chat");
-  const stopBtn = agent.running ? `<button class="agent-stop" data-agent="${escapeHtml(agent.id)}" title="${escapeHtml(t("sidebar.pause"))}">×</button>` : "";
+  const stopBtn = agent.running ? `<button class="agent-stop" data-agent="${escapeHtml(agent.id)}" title="${escapeHtml(t("sidebar.pause"))}" aria-label="${escapeHtml(t("sidebar.pause"))}">⏸</button>` : "";
   const startBtn = (!agent.running && !backend.disabled) ? `<button class="agent-start" data-agent="${escapeHtml(agent.id)}" title="${escapeHtml(t("sidebar.start"))}">▶</button>` : "";
   return `
     <div class="agent-group ${agent.running ? "running" : ""}">
