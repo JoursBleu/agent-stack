@@ -993,8 +993,12 @@ function handleConvEvent(chatId, ev) {
     if (!p.id) return;
     // Skip messages our own POST flow has already inserted (echo of /messages).
     if ((chat.messages || []).some(m => m.id === p.id)) return;
-    // We mainly care about system/error inserts from the runner callback; the
-    // user/assistant happy path is driven by our own send loop.
+    // The user/assistant happy path is driven entirely by sendCurrent() /
+    // requestAssistant(); the SSE echo would otherwise duplicate them because
+    // userMsg.id is only assigned AFTER the POST returns, so the id-based
+    // dedup above won't catch this race. Only system/error pushes from the
+    // runner-side callback are interesting to inject here.
+    if (p.role !== "system" && p.role !== "error") return;
     chat.messages = chat.messages || [];
     chat.messages.push({ id: p.id, role: p.role || "system", content: p.content || "" });
     chat.messageCount = chat.messages.length;
