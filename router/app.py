@@ -92,6 +92,15 @@ DB_PATH = Path(os.getenv("DB_PATH", str(STACK_ROOT / "router.db"))).resolve()
 # HOST_STACK_ROOT before passing to dockerd.
 HOST_STACK_ROOT = Path(os.getenv("HOST_STACK_ROOT", str(STACK_ROOT))).resolve()
 
+# URL that runners use to call back into the router (e.g. to inject
+# heartbeat / cron messages). Defaults to the docker bridge gateway so
+# default Linux docker setups work out of the box. Override with
+# AGENT_STACK_CALLBACK_URL=http://host.docker.internal:18080 on Mac /
+# Windows, or the router's container-network alias on multi-host setups.
+AGENT_STACK_CALLBACK_URL = os.getenv(
+    "AGENT_STACK_CALLBACK_URL", "http://172.17.0.1:18080"
+).rstrip("/")
+
 
 def to_host_path(p: Path | str) -> str:
     p = Path(p).resolve()
@@ -1021,6 +1030,13 @@ class RunnerManager:
                 env["AGENT_USER_ID"] = user["id"]
                 env["AGENT_USER_EMAIL"] = user.get("email", "") or ""
                 env["AGENT_USER_NAME"] = user.get("name", "") or ""
+                # Callback envs let the runner POST events (cron heartbeats,
+                # background results, etc.) back to its own conversation via
+                # /api/internal/agents/{agent_id}/event using the runner's own
+                # api_key as a bearer token.
+                env["AGENT_STACK_AGENT_ID"] = agent_id
+                env["AGENT_STACK_RUNNER_API_KEY"] = api_key
+                env["AGENT_STACK_CALLBACK_URL"] = AGENT_STACK_CALLBACK_URL
                 env.update(effective_env)
 
                 self._emit_progress(user["id"], backend_def.name, RunnerEvent(
@@ -1148,7 +1164,18 @@ class RunnerManager:
                 stage="ready", progress=100, message="ready",
             ))
             self.touch_agent(agent_id)
-            return self.get_runner_for_agent(agent_id)  # type: ignore[return-value]
+            runner_row = self.get_runner_for_agent(agent_id)
+            try:
+                _publish_agent_event(agent_id, "runner_status", {
+                    "agent_id": agent_id,
+                    "backend": backend_def.name,
+                    "running": True,
+                    "container_name": container_name,
+                    "ts": int(time.time()),
+                })
+            except Exception:
+                log.exception("publish runner_status(started) failed")
+            return runner_row  # type: ignore[return-value]
 
     def _wait_ready(self, user_id: str, backend_def: Backend) -> None:
         agent = _ensure_legacy_agent(user_id, backend_def.name)
@@ -1241,6 +1268,15 @@ class RunnerManager:
         except NotFound:
             pass
         self._delete_runner_row_for_agent(agent_id)
+        try:
+            _publish_agent_event(agent_id, "runner_status", {
+                "agent_id": agent_id,
+                "backend": runner.get("backend"),
+                "running": False,
+                "ts": int(time.time()),
+            })
+        except Exception:
+            log.exception("publish runner_status(stopped) failed")
         return True
 
     def _delete_runner_row_for_agent(self, agent_id: str) -> None:
@@ -2538,6 +2574,11 @@ def append_message(
         row = conn.execute(
             "SELECT * FROM messages WHERE id = ?", (msg_id,)
         ).fetchone()
+    # Broadcast to live SSE subscribers (other tabs / multi-device sync).
+    _publish_conv_event(conv_id, "message", {
+        "id": msg_id, "conversation_id": conv_id, "role": role,
+        "content": content, "created_at": now,
+    })
     return {"message": _message_row(row)}
 
 
@@ -3332,6 +3373,188 @@ async def api_room_stream(room_id: str, user: dict[str, Any] = Depends(current_u
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
     })
+
+
+# ---------------------------------------------------------------------------
+# Per-conversation SSE + agent-side callback (step 5)
+# ---------------------------------------------------------------------------
+
+_CONV_SUBSCRIBERS: dict[str, list[asyncio.Queue]] = {}
+_CONV_SUB_LOCK = threading.Lock()
+
+
+def _conv_subscribers(conv_id: str) -> list[asyncio.Queue]:
+    with _CONV_SUB_LOCK:
+        return list(_CONV_SUBSCRIBERS.get(conv_id, ()))
+
+
+def _publish_conv_event(conv_id: str, kind: str, payload: dict[str, Any]) -> None:
+    """Fan-out a single event to every active SSE subscriber of one conversation.
+
+    Safe from any thread or sync code path: each subscriber captured its
+    own loop at subscribe time. Best-effort, swallows exceptions.
+    """
+    event = {"kind": kind, "payload": payload}
+    for q in _conv_subscribers(conv_id):
+        loop = getattr(q, "_conv_loop", None)
+        if loop is None or loop.is_closed():
+            continue
+        try:
+            loop.call_soon_threadsafe(q.put_nowait, event)
+        except Exception:  # pragma: no cover
+            pass
+
+
+def _publish_agent_event(agent_id: str, kind: str, payload: dict[str, Any]) -> None:
+    """Broadcast an event to every conversation belonging to this agent."""
+    try:
+        with db_connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM conversations WHERE agent_id = ?", (agent_id,),
+            ).fetchall()
+    except Exception:
+        return
+    for r in rows:
+        _publish_conv_event(r["id"], kind, payload)
+
+
+@app.get("/api/conversations/{conv_id}/stream")
+async def api_conversation_stream(
+    conv_id: str,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """SSE stream of live events for one conversation.
+
+    Emits: hello, message (system/user/assistant new-message echo),
+    runner_status (agent runner started/stopped/reaped), keepalive comments.
+    """
+    _get_user_conversation(conv_id, user["id"])
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue._conv_loop = loop  # type: ignore[attr-defined]
+    with _CONV_SUB_LOCK:
+        _CONV_SUBSCRIBERS.setdefault(conv_id, []).append(queue)
+
+    async def gen():
+        try:
+            yield b'data: {"kind":"hello"}\n\n'
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25)
+                except asyncio.TimeoutError:
+                    yield b': keepalive\n\n'
+                    continue
+                yield ("data: " + json.dumps(event) + "\n\n").encode()
+        finally:
+            with _CONV_SUB_LOCK:
+                lst = _CONV_SUBSCRIBERS.get(conv_id, [])
+                if queue in lst:
+                    lst.remove(queue)
+                if not lst:
+                    _CONV_SUBSCRIBERS.pop(conv_id, None)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
+
+
+class AgentEventBody(BaseModel):
+    conversation_id: str | None = None  # default: most recent for this agent
+    role: str = "system"  # one of user|assistant|system|error
+    kind: str = "message"  # SSE event kind; "message" appends to DB, others just broadcast
+    content: str = ""
+    payload: dict[str, Any] | None = None
+    persist: bool = True  # if False, broadcast only (no DB insert)
+
+
+def _runner_for_bearer(agent_id: str, auth_header: str | None) -> dict[str, Any]:
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    parts = auth_header.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="malformed authorization header")
+    presented = parts[1].strip()
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM runners WHERE agent_id = ?", (agent_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no runner for agent")
+    if not secrets.compare_digest(row["api_key"], presented):
+        raise HTTPException(status_code=403, detail="invalid runner api key")
+    return dict(row)
+
+
+@app.post("/api/internal/agents/{agent_id}/event")
+async def api_internal_agent_event(
+    agent_id: str,
+    body: AgentEventBody,
+    request: Request,
+):
+    """Runner-side callback: let a running agent inject messages/events into
+    one of its own conversations, authenticated by the runner's own api_key.
+
+    Typical use: cron / background tasks inside the agent container push a
+    "system" message saying "build finished" or "heartbeat at T+5min", and
+    the user's open browser tab sees it appear live via /stream.
+    """
+    runner = _runner_for_bearer(agent_id, request.headers.get("authorization"))
+    role = body.role if body.role in ("user", "assistant", "system", "error") else "system"
+    kind = (body.kind or "message").strip() or "message"
+    content = body.content or ""
+
+    # Resolve target conversation: explicit id wins, otherwise the agent's
+    # most-recently-active conversation.
+    conv_id = (body.conversation_id or "").strip() or None
+    with db_connect() as conn:
+        if conv_id:
+            row = conn.execute(
+                "SELECT id, agent_id, user_id FROM conversations WHERE id = ?",
+                (conv_id,),
+            ).fetchone()
+            if (row is None
+                    or row["agent_id"] != agent_id
+                    or row["user_id"] != runner["user_id"]):
+                raise HTTPException(status_code=404, detail="conversation not found for this agent")
+        else:
+            row = conn.execute(
+                """
+                SELECT id FROM conversations
+                WHERE agent_id = ? AND user_id = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (agent_id, runner["user_id"]),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=409, detail="agent has no conversations yet")
+            conv_id = row["id"]
+
+    msg_id = None
+    now = int(time.time())
+    if body.persist and kind == "message":
+        msg_id = secrets.token_hex(12)
+        with _DB_LOCK, db_connect() as conn:
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?,?,?,?,?)",
+                (msg_id, conv_id, role, content, now),
+            )
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conv_id),
+            )
+
+    payload = {
+        "id": msg_id,
+        "conversation_id": conv_id,
+        "agent_id": agent_id,
+        "role": role,
+        "content": content,
+        "created_at": now,
+        "extra": body.payload or {},
+    }
+    _publish_conv_event(conv_id, kind, payload)
+    return {"message_id": msg_id, "conversation_id": conv_id, "created_at": now}
 
 
 # ---------------------------------------------------------------------------

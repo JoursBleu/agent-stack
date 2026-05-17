@@ -375,6 +375,8 @@ const State = {
   activeChatId: null,
   authMode: "login",
   progressES: null,
+  convES: null,
+  convESChatId: null,
   expandedBackends: new Set(),
   agents: [],            // [{id, user_id, backend, name, model, ordinal, running, runner, ...}]
   expandedAgents: new Set(),
@@ -951,10 +953,70 @@ async function loadAgents() {
   } catch { State.agents = []; }
 }
 
+
+function closeConvStream() {
+  if (State.convES) {
+    try { State.convES.close(); } catch {}
+  }
+  State.convES = null;
+  State.convESChatId = null;
+}
+
+function openConvStream(chatId) {
+  if (State.convESChatId === chatId && State.convES) return;
+  closeConvStream();
+  if (!chatId) return;
+  try {
+    const es = new EventSource(`/api/conversations/${chatId}/stream`, { withCredentials: true });
+    State.convES = es;
+    State.convESChatId = chatId;
+    es.onmessage = (ev) => {
+      let data; try { data = JSON.parse(ev.data); } catch { return; }
+      handleConvEvent(chatId, data);
+    };
+    es.onerror = () => {
+      // Browser auto-reconnects EventSource by default; we only clear state if
+      // the user has already switched chats.
+      if (State.convESChatId !== State.activeChatId) closeConvStream();
+    };
+  } catch (e) {
+    console.warn("conv stream open failed", e);
+  }
+}
+
+function handleConvEvent(chatId, ev) {
+  if (!ev || !ev.kind) return;
+  const chat = State.chats.find(c => c.id === chatId);
+  if (!chat) return;
+  if (ev.kind === "message") {
+    const p = ev.payload || {};
+    if (!p.id) return;
+    // Skip messages our own POST flow has already inserted (echo of /messages).
+    if ((chat.messages || []).some(m => m.id === p.id)) return;
+    // We mainly care about system/error inserts from the runner callback; the
+    // user/assistant happy path is driven by our own send loop.
+    chat.messages = chat.messages || [];
+    chat.messages.push({ id: p.id, role: p.role || "system", content: p.content || "" });
+    chat.messageCount = chat.messages.length;
+    if (chat.id === State.activeChatId) {
+      renderMessages(chat);
+      $("#chat-meta").textContent = `${chat.model || chat.backend} \u00b7 ${t("chat.message_count", {n: chat.messages.length})}`;
+    } else {
+      renderChatList();
+    }
+  } else if (ev.kind === "runner_status") {
+    // A runner came up or went down for this agent — refresh runners so the
+    // sidebar badge updates promptly without waiting for the next poll.
+    try { refreshRunners(); } catch {}
+  }
+}
+
 async function selectChat(id, opts) {
   State.activeChatId = id;
   const chat = State.chats.find(c => c.id === id);
   renderChatList();
+  // Always (re)open the per-conversation SSE stream for the new active chat.
+  openConvStream(id);
   if (!chat) { $("#model-picker").classList.add("hidden"); return; }
   if (opts && opts.pushUrl === true) syncChatUrl(chat);
   if (!chat.loaded) {
