@@ -311,6 +311,20 @@ def db_init() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_messages_conv
                 ON messages(conversation_id, created_at);
+            CREATE TABLE IF NOT EXISTS agents (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                name TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                ordinal INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE (user_id, backend, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS idx_agents_user_backend
+                ON agents(user_id, backend);
             CREATE TABLE IF NOT EXISTS rooms (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -380,6 +394,57 @@ def db_init() -> None:
                 DROP TABLE user_env_overrides;
                 ALTER TABLE user_env_overrides_new RENAME TO user_env_overrides;
                 """
+            )
+
+        # agents-multi-instance refactor (2026-05) — backfill default agents
+        # and stamp agent_id onto existing runners / conversations.
+        conv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        runner_cols = {r["name"] for r in conn.execute("PRAGMA table_info(runners)").fetchall()}
+        if conv_cols and "agent_id" not in conv_cols:
+            log.info("migrating conversations: adding agent_id column")
+            conn.execute("ALTER TABLE conversations ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+        if runner_cols and "agent_id" not in runner_cols:
+            log.info("migrating runners: adding agent_id column")
+            conn.execute("ALTER TABLE runners ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+        # Backfill: every (user_id, backend) pair that has a runner or a
+        # conversation needs a corresponding agent (ordinal=1, name=backend).
+        need_default = conn.execute(
+            """
+            SELECT DISTINCT user_id, backend FROM (
+              SELECT user_id, backend FROM runners
+              UNION ALL
+              SELECT user_id, backend FROM conversations
+            )
+            """
+        ).fetchall()
+        for r in need_default:
+            uid = r["user_id"]; be = r["backend"]
+            # only create if no agent yet for this (user, backend)
+            existing = conn.execute(
+                "SELECT id FROM agents WHERE user_id = ? AND backend = ? ORDER BY ordinal LIMIT 1",
+                (uid, be),
+            ).fetchone()
+            if existing:
+                aid = existing["id"]
+            else:
+                aid = secrets.token_hex(12)
+                now = int(time.time())
+                conn.execute(
+                    """
+                    INSERT INTO agents (id, user_id, backend, name, model, ordinal, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (aid, uid, be, be, "", now, now),
+                )
+                log.info("backfilled default agent %s for user=%s backend=%s", aid, uid, be)
+            # stamp agent_id on runner / conv rows missing it
+            conn.execute(
+                "UPDATE runners SET agent_id = ? WHERE user_id = ? AND backend = ? AND (agent_id IS NULL OR agent_id = '')",
+                (aid, uid, be),
+            )
+            conn.execute(
+                "UPDATE conversations SET agent_id = ? WHERE user_id = ? AND backend = ? AND (agent_id IS NULL OR agent_id = '')",
+                (aid, uid, be),
             )
 
         # rooms.visibility (default 'private') — added 2026-05
@@ -1882,8 +1947,182 @@ async def admin_delete_user(
 # -- conversations ---------------------------------------------------
 
 
-class ConversationCreate(BaseModel):
+# ---------------------------------------------------------------------------
+# Agents (per-user, multi-instance backend containers)
+# ---------------------------------------------------------------------------
+
+MAX_AGENTS_PER_BACKEND = env_int("MAX_AGENTS_PER_BACKEND", 3)
+
+
+def _agent_row(a: sqlite3.Row, runner: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "id": a["id"],
+        "user_id": a["user_id"],
+        "backend": a["backend"],
+        "name": a["name"],
+        "model": a["model"] or "",
+        "ordinal": int(a["ordinal"]),
+        "created_at": a["created_at"],
+        "updated_at": a["updated_at"],
+        "running": bool(runner),
+        "container_name": (runner or {}).get("container_name"),
+        "host_port": (runner or {}).get("host_port"),
+    }
+
+
+def _get_user_agent(agent_id: str, user_id: str) -> sqlite3.Row:
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM agents WHERE id = ? AND user_id = ?",
+            (agent_id, user_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="agent not found")
+    return row
+
+
+def _list_user_agents(user_id: str) -> list[sqlite3.Row]:
+    with db_connect() as conn:
+        return list(conn.execute(
+            "SELECT * FROM agents WHERE user_id = ? ORDER BY backend, ordinal",
+            (user_id,),
+        ).fetchall())
+
+
+def _next_agent_ordinal(user_id: str, backend: str) -> int:
+    """Return smallest free ordinal in 1..MAX_AGENTS_PER_BACKEND, or raise."""
+    with db_connect() as conn:
+        used = {int(r["ordinal"]) for r in conn.execute(
+            "SELECT ordinal FROM agents WHERE user_id = ? AND backend = ?",
+            (user_id, backend),
+        ).fetchall()}
+    for i in range(1, MAX_AGENTS_PER_BACKEND + 1):
+        if i not in used:
+            return i
+    raise HTTPException(
+        status_code=409,
+        detail=f"reached the max of {MAX_AGENTS_PER_BACKEND} agents for backend {backend!r}",
+    )
+
+
+def _ensure_legacy_agent(user_id: str, backend: str) -> sqlite3.Row:
+    """Find or create the ordinal=1 agent for (user, backend). Used by legacy
+    code paths (rooms, old API callers) that haven't been updated to pass an
+    explicit agent_id yet."""
+    if backend not in BACKENDS:
+        raise HTTPException(status_code=400, detail="unknown backend")
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM agents WHERE user_id = ? AND backend = ? ORDER BY ordinal LIMIT 1",
+            (user_id, backend),
+        ).fetchone()
+    if row:
+        return row
+    aid = secrets.token_hex(12)
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO agents (id, user_id, backend, name, model, ordinal, created_at, updated_at)
+            VALUES (?, ?, ?, ?, '', 1, ?, ?)
+            """,
+            (aid, user_id, backend, backend, now, now),
+        )
+        return conn.execute("SELECT * FROM agents WHERE id = ?", (aid,)).fetchone()
+
+
+class AgentCreateBody(BaseModel):
     backend: str
+    name: str
+    model: str | None = None
+
+
+class AgentPatchBody(BaseModel):
+    name: str | None = None
+    model: str | None = None
+
+
+@app.get("/api/agents")
+def api_list_agents(user: dict[str, Any] = Depends(current_user)):
+    runners_by_aid = {r["agent_id"]: r for r in MANAGER.list_runners(user["id"]) if r.get("agent_id")}
+    return {
+        "agents": [_agent_row(a, runners_by_aid.get(a["id"])) for a in _list_user_agents(user["id"])],
+        "max_per_backend": MAX_AGENTS_PER_BACKEND,
+    }
+
+
+@app.post("/api/agents")
+def api_create_agent(body: AgentCreateBody, user: dict[str, Any] = Depends(current_user)):
+    if body.backend not in BACKENDS:
+        raise HTTPException(status_code=400, detail="unknown backend")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    name = name[:80]
+    model = (body.model or "").strip()[:200]
+    ordinal = _next_agent_ordinal(user["id"], body.backend)
+    aid = secrets.token_hex(12)
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO agents (id, user_id, backend, name, model, ordinal, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (aid, user["id"], body.backend, name, model, ordinal, now, now),
+        )
+        row = conn.execute("SELECT * FROM agents WHERE id = ?", (aid,)).fetchone()
+    return {"agent": _agent_row(row)}
+
+
+@app.patch("/api/agents/{agent_id}")
+def api_patch_agent(
+    agent_id: str,
+    body: AgentPatchBody,
+    user: dict[str, Any] = Depends(current_user),
+):
+    row = _get_user_agent(agent_id, user["id"])
+    name = row["name"]
+    model = row["model"] or ""
+    if body.name is not None:
+        n = body.name.strip()
+        if not n:
+            raise HTTPException(status_code=400, detail="name cannot be empty")
+        name = n[:80]
+    if body.model is not None:
+        model = body.model.strip()[:200]
+    now = int(time.time())
+    with _DB_LOCK, db_connect() as conn:
+        conn.execute(
+            "UPDATE agents SET name = ?, model = ?, updated_at = ? WHERE id = ?",
+            (name, model, now, agent_id),
+        )
+        row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    return {"agent": _agent_row(row)}
+
+
+@app.delete("/api/agents/{agent_id}")
+async def api_delete_agent(
+    agent_id: str,
+    user: dict[str, Any] = Depends(current_user),
+):
+    row = _get_user_agent(agent_id, user["id"])
+    # stop & remove the underlying runner (if any) — legacy path until step 2
+    # rekeys the manager.
+    try:
+        await asyncio.to_thread(MANAGER.stop, user["id"], row["backend"])
+    except Exception:
+        log.exception("failed to stop runner during agent delete %s", agent_id)
+    # cascade delete the agent's conversations and the agent itself.
+    with _DB_LOCK, db_connect() as conn:
+        conn.execute("DELETE FROM conversations WHERE agent_id = ?", (agent_id,))
+        conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+    return Response(status_code=204)
+
+
+class ConversationCreate(BaseModel):
+    agent_id: str | None = None
+    backend: str | None = None
     model: str | None = None
     title: str | None = None
 
@@ -1906,6 +2145,7 @@ def _conversation_row(
         "id": conv["id"],
         "backend": conv["backend"],
         "model": conv["model"],
+        "agent_id": conv["agent_id"] if "agent_id" in conv.keys() else "",
         "title": conv["title"] or "",
         "created_at": conv["created_at"],
         "updated_at": conv["updated_at"],
@@ -2008,19 +2248,29 @@ def create_conversation(
     body: ConversationCreate,
     user: dict[str, Any] = Depends(current_user),
 ):
-    if body.backend not in BACKENDS:
-        raise HTTPException(status_code=400, detail="unknown backend")
+    # New flow: client passes agent_id; we resolve backend/model from the agent.
+    # Legacy flow: client passes backend (and optional model); we pick or
+    # create the ordinal=1 agent for that (user, backend).
+    if body.agent_id:
+        agent = _get_user_agent(body.agent_id, user["id"])
+    elif body.backend:
+        if body.backend not in BACKENDS:
+            raise HTTPException(status_code=400, detail="unknown backend")
+        agent = _ensure_legacy_agent(user["id"], body.backend)
+    else:
+        raise HTTPException(status_code=400, detail="agent_id or backend required")
+    backend = agent["backend"]
+    model = body.model or agent["model"] or backend
     conv_id = secrets.token_hex(12)
     now = int(time.time())
-    model = body.model or body.backend
     title = (body.title or "").strip()
     with _DB_LOCK, db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO conversations (id, user_id, backend, model, title, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO conversations (id, user_id, backend, model, title, agent_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (conv_id, user["id"], body.backend, model, title, now, now),
+            (conv_id, user["id"], backend, model, title, agent["id"], now, now),
         )
         row = conn.execute(
             "SELECT * FROM conversations WHERE id = ?", (conv_id,)
