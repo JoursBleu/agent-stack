@@ -1836,15 +1836,40 @@ async def v1_proxy(path: str, request: Request, user: dict[str, Any] = Depends(c
         except Exception:
             pass
 
-    backend_def = find_backend_for_model(model_id) if model_id else None
-    if backend_def is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"no backend serves model={model_id!r}; available={list(BACKENDS)}",
-        )
+    # Route by conversation's agent_id when the SPA passes user="agstack-<conv_id>".
+    agent_row: sqlite3.Row | None = None
+    if user_field.startswith("agstack-"):
+        conv_id = user_field[len("agstack-"):]
+        with db_connect() as _conn:
+            crow = _conn.execute(
+                "SELECT * FROM conversations WHERE id = ? AND user_id = ?",
+                (conv_id, user["id"]),
+            ).fetchone()
+            if crow and crow["agent_id"]:
+                agent_row = _conn.execute(
+                    "SELECT * FROM agents WHERE id = ? AND user_id = ?",
+                    (crow["agent_id"], user["id"]),
+                ).fetchone()
 
-    runner = await asyncio.to_thread(MANAGER.ensure, user, backend_def.name)
-    MANAGER.touch(user["id"], backend_def.name)
+    if agent_row is not None:
+        backend_def = BACKENDS.get(agent_row["backend"])
+        if backend_def is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"agent references unknown backend {agent_row['backend']!r}",
+            )
+    else:
+        backend_def = find_backend_for_model(model_id) if model_id else None
+        if backend_def is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no backend serves model={model_id!r}; available={list(BACKENDS)}",
+            )
+        # Fall back to the legacy ordinal=1 agent for this (user, backend).
+        agent_row = _ensure_legacy_agent(user["id"], backend_def.name)
+
+    runner = await asyncio.to_thread(MANAGER.ensure_for_agent, user, agent_row)
+    MANAGER.touch_agent(agent_row["id"])
 
     # If the backend is strict about the upstream `model` field (e.g. nanobot
     # rejects anything except its single configured model id), rewrite the
@@ -1855,8 +1880,11 @@ async def v1_proxy(path: str, request: Request, user: dict[str, Any] = Depends(c
         and parsed_payload is not None
         and parsed_payload.get("model")
     ):
-        eff_env = MANAGER.get_effective_env_for_backend(user["id"], backend_def.name)
-        upstream_model = eff_env.get(backend_def.forward_model_env)
+        # Per-agent override wins over the env-var default.
+        upstream_model = (agent_row["model"] or "").strip() if agent_row is not None else ""
+        if not upstream_model:
+            eff_env = MANAGER.get_effective_env_for_backend(user["id"], backend_def.name)
+            upstream_model = eff_env.get(backend_def.forward_model_env, "")
         if upstream_model and upstream_model != parsed_payload.get("model"):
             parsed_payload["model"] = upstream_model
             body = json.dumps(parsed_payload).encode()
@@ -1896,10 +1924,11 @@ async def v1_proxy(path: str, request: Request, user: dict[str, Any] = Depends(c
     content_type = upstream_response.headers.get("content-type", "")
 
     if "text/event-stream" in content_type.lower():
+        agent_id_for_touch = agent_row["id"]
         async def stream_gen():
             try:
                 async for chunk in upstream_response.aiter_raw():
-                    MANAGER.touch(user["id"], backend_def.name)
+                    MANAGER.touch_agent(agent_id_for_touch)
                     yield chunk
             finally:
                 await upstream_response.aclose()
