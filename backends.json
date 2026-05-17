@@ -25,7 +25,9 @@
       "LLM_MODEL"
     ],
     "templated_files": [
-      "openclaw.json"
+      "openclaw.json",
+      "AGENTS.md",
+      "skills/agent-stack-callback/SKILL.md"
     ],
     "cmd": [
       "node",
@@ -72,7 +74,9 @@
     ],
     "templated_files": [
       "config.yaml",
-      ".env"
+      ".env",
+      "AGENTS.md",
+      "skills/agent-stack-callback/SKILL.md"
     ],
     "cmd": [
       "gateway",
@@ -107,7 +111,9 @@
       "LLM_MODEL"
     ],
     "templated_files": [
-      "config.json"
+      "config.json",
+      "AGENTS.md",
+      "skills/agent-stack-callback/SKILL.md"
     ],
     "cmd": [
       "serve"
